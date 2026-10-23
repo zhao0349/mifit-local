@@ -1,0 +1,4 @@
+# Core cloud/cache/export implementation, pinned to the audited upstream source.
+mi-fitness-data-bridge @ git+https://github.com/shkyyy18/mi_fitness_data_bridge.git@91ea4f15323c1c699e8c5ee8d044c0a820918851
+keyring>=25,<26
+playwright>=1.51,<2

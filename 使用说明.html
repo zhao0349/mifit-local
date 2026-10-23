@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小米运动健康 · 本地导出使用说明</title>
+<style>
+body{font:16px/1.8 "Microsoft YaHei UI",system-ui,sans-serif;color:#243746;background:#f3f6f8;margin:0}
+main{max-width:860px;margin:40px auto;padding:38px 44px;background:white;border-radius:16px}
+h1{font-size:30px;line-height:1.4}h2{margin-top:32px;font-size:21px}a{color:#176a9a}
+.note{padding:14px 18px;background:#edf5fb;border-radius:10px}code{background:#eef2f5;padding:2px 6px;border-radius:4px}
+li{margin:8px 0}small{color:#52616b}table{border-collapse:collapse;width:100%}td,th{padding:10px;border-bottom:1px solid #dae3e9;text-align:left}
+</style>
+<main>
+<h1>把小米运动健康数据导出到自己电脑</h1>
+<p>这是中文 Windows 桌面入口，基于 Mi Fitness Data Bridge 0.3.3。地区为中国大陆，导出保存在 <code>项目目录</code>。</p>
+<h2>首次使用</h2>
+<ol>
+<li>先打开手机上的“小米运动健康”，确保手环或手表的数据已经同步到 App。</li>
+<li>双击 <code>启动小米数据导出.cmd</code>。</li>
+<li>点击<strong>小米官网登录</strong>。程序会打开一个独立的 Microsoft Edge 窗口，网址为 <a href="https://account.xiaomi.com/">account.xiaomi.com</a>。</li>
+<li>由你本人在小米页面完成登录、短信或其他验证。若官网显示扫码入口，可以自行扫码。程序不填写密码，不代办验证码。</li>
+<li>官网提供所需登录 Cookie 后，窗口会自动关闭，界面显示凭证已保存。凭证存入本机当前 Windows 用户的凭据管理器。</li>
+<li>选择日期，点击<strong>同步并导出</strong>。首次建议先试近 30 天。完成后点击<strong>打开导出文件夹</strong>。</li>
+</ol>
+<p class="note">官网登录接入是本次新增的本机功能。是否显示二维码、是否要求二次验证、是否发放所需 Cookie，均由小米决定。使用官方页面不保证避开风控。如果登录后始终未连接，请停止等待并参考下方备用方法。</p>
+<h2>导出文件</h2>
+<table>
+<tr><th>位置或格式</th><th>用途</th></tr>
+<tr><td><code>exports\日期时间…\</code></td><td>每次创建独立目录，不覆盖之前的导出；具体子目录以界面提示为准。</td></tr>
+<tr><td>CSV</td><td>每个数据类型一个文件，带 UTF-8 BOM，方便 Excel 打开中文。</td></tr>
+<tr><td>JSON</td><td>用于后续程序处理。只包含所选日期范围。</td></tr>
+<tr><td><code>data\账号目录\mi_fitness.db</code></td><td>SQLite 本机缓存，包含该账号已经同步的全部记录。请保留以便重复同步；导出文件夹只提供按日期筛选的 CSV / JSON。</td></tr>
+<tr><td><code>demo\</code></td><td>“离线自检”的虚构数据，与个人数据分开。</td></tr>
+</table>
+<p>日期按北京时间（Asia/Shanghai）筛选，包括起止日。带时区的时间戳先换算到北京时间判断日期，但导出保留原始时间戳；没有时区的历史值按北京时间理解。睡眠等跨午夜记录以开始时间筛选，需要时将日期前后各放宽一天。运动明细和 GPS 是否可用取决于设备与上游接口。</p>
+<h2>离线健康仪表盘</h2>
+<p>打开 <a href="健康仪表盘.html">健康仪表盘.html</a> 即可查看已经整理好的年度档案。页面、图表、处理程序和数据都包含在这一个文件中，无需安装、服务器或联网。</p>
+<ol>
+<li>通过日期范围查看活动、睡眠、心率和运动记录。右上角可选择跟随系统、浅色或深色主题。</li>
+<li>点击摘要卡、身体指标，或各大卡片的<strong>查看详情</strong>，展开活动、睡眠、心率、身体或运动的详细仪表盘。详情支持独立日期筛选、日／周／月趋势、逐日记录和本类 CSV 导出；关闭后总览的筛选与位置不变。点击单次运动可直接查看其时长、距离、热量、心率和已提供的配速。</li>
+<li>在<strong>心率详情</strong>中查看单日采样曲线，切换日期、时段和采样类型；点按曲线或拖动读数滑杆可查看具体记录。在<strong>睡眠详情</strong>中选择主睡眠或小睡，查看阶段时间轴与顺序明细。日期统一按北京时间，睡眠按醒来日期归日。</li>
+<li>以后导出新数据，点击网页内的<strong>导入数据</strong>，选择导出工具生成的 JSON。浏览器会在本机分块汇总；新档案替换当前页面中的档案，不与旧档案合并。</li>
+<li>完成后点击<strong>保存离线副本</strong>。把生成的单个 HTML 文件传到手机，用支持本地 HTML 和 JavaScript 的浏览器打开即可；无需携带原始 JSON。部分系统的文件预览器无法执行交互程序，需要改用浏览器。</li>
+</ol>
+<p>仪表盘保留日汇总、运动概览、心率原始采样值及时间、睡眠区间和阶段顺序；不保留账号、设备标识、GPS 路线或运动逐秒明细。心率缺测超过 15 分钟时曲线断开，密集数据仅简化绘图，保留的原始读数不变。当前 JSON 的睡眠阶段只有顺序和分钟数，因此阶段时间轴明确标注为近似重建；无法定位的时长不补造为清醒，阶段合计超过区间时仅展示阶段顺序。原始导出文件不会修改。汇总方法和缺失值处理可在网页的“数据说明”中查看；新文件仍含个人健康摘要和分时明细，请妥善保存。</p>
+<h2>常用操作</h2>
+<ul>
+<li><strong>仅导出已有缓存</strong>：无需访问小米，适用于已有缓存时重新导出。</li>
+<li><strong>停止</strong>：结束登录等待或同步；已写入的记录保留。再次同步同一日期不会简单重复追加记录。</li>
+<li><strong>离线自检</strong>：不登录、不访问小米，用虚构数据检查本地导出功能。通过不代表真实账号一定兼容。</li>
+<li><strong>历史记录</strong>：直接修改开始日期；数据很多时建议分月或分年同步。程序无法保证小米仍保留全部历史记录。</li>
+</ul>
+<h2>手动配置备用方法</h2>
+<p>如果官方登录窗口没有自动完成，可以按项目祖先仓库提供的方法，在自己理解并信任的本机环境中操作：</p>
+<ol>
+<li>在 Edge/Chrome 打开 <a href="https://account.xiaomi.com/">小米账号官网</a>，登录小米运动健康所用账号。</li>
+<li>按 <strong>F12</strong> 打开开发者工具。进入 <strong>应用程序（Application）→ 存储（Storage）→ Cookies → https://account.xiaomi.com</strong>。</li>
+<li>找到 <code>userId</code> 和 <code>passToken</code> 的值，只复制到本机导出程序的“手动配置”输入框，点击保存。</li>
+<li>不要把这些值发到聊天、写入命令行或分享截图。没有相应字段时不要用其他无关 Token 代替。</li>
+</ol>
+<p>此方法有祖先项目文档依据，但可能随小米网站变化失效：
+<a href="https://github.com/kubulashvili/mi-fitness-mcp#setup">原项目 Setup</a>、
+<a href="https://github.com/binglua/mi-fitness-mcp-cn#配置">中国地区版本配置说明</a>、
+<a href="https://learn.microsoft.com/en-us/microsoft-edge/devtools/storage/cookies">微软 Cookies 操作说明</a>。</p>
+<h2>连接失败或记录为空</h2>
+<ul>
+<li>凭证过期：再次点击“小米官网登录”。</li>
+<li>无法打开 Edge：确认系统 Microsoft Edge 可正常启动，再重新打开导出工具。</li>
+<li>部分类型失败：成功的数据会保留；导出结果可能含之前缓存。查看界面提示，稍后重试相同日期。</li>
+<li>返回 0 条：核对登录账号、日期、手机 App 同步情况，以及使用的是否确为“小米运动健康 Mi Fitness”。Zepp Life 不是同一配置。</li>
+<li>网络错误：同步遵循上游直连小米的实现，不使用系统代理。需要本机能够访问小米服务。</li>
+</ul>
+<h2>本机数据与部署信息</h2>
+<p>凭证使用 Windows 凭据管理器中的 <code>MiFit-Desktop-Bridge</code> 服务。独立登录浏览器会话不复用已有个人浏览器资料，也不保存 Cookie 导出文件。健康数据只保存到本地；工具未连接远程 MCP 或分析服务。导出仍可能含账号标识、健康数据和 GPS，分享前请自行检查。</p>
+<p>桌面导出工具依赖当前已安装的 Python 和 Edge。不要移动或删除 <code>.venv</code> 及应用脚本。上游依赖从原作者仓库的固定提交安装，不会自动拉取更新；初次安装见仓库 README。独立的健康仪表盘 HTML 可以单独复制和移动，仅需浏览器。</p>
+<p><strong>非官方、实验性：</strong>本工具与小米无隶属、背书或支持关系。非公开接口可能变化，不能保证所有设备、账号和历史范围均可用。已完成的合成测试和本机启动检查不能替代本人账号的实际同步验证。</p>
+<p><a href="https://github.com/shkyyy18/mi_fitness_data_bridge">参考项目</a> ·
+<a href="https://github.com/shkyyy18/mi_fitness_data_bridge/blob/main/docs/compatibility.md">兼容性说明</a> ·
+<a href="https://github.com/shkyyy18/mi_fitness_data_bridge/blob/main/docs/export-format.md">导出格式</a></p>
+<small>开源整理日期：2026-10-23。上游 commit：91ea4f15323c1c699e8c5ee8d044c0a820918851。上游采用 AGPL-3.0-only，原始归属和 MIT 声明保留在 licenses/mi-fitness-data-bridge-LICENSE.txt 与 licenses/mi-fitness-data-bridge-NOTICES.md。</small>
+</main>
+</html>
