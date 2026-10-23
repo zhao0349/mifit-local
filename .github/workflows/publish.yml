@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONUTF8: '1'
+
 concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: true
@@ -28,8 +31,6 @@ jobs:
       - run: python -m ruff check .
       - run: python dashboard_builder.py --demo --output dashboard/demo/健康仪表盘.html
       - run: python -m pytest tests -q
-        env:
-          PYTHONUTF8: '1'
 
   build:
     needs: test
