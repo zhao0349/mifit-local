@@ -71,8 +71,9 @@ def test_chunks_unicode_escapes_structure_and_identity_filtering():
         assert data["meta"]["source_counts"]["workout_gps"] == 1
         assert data["meta"]["source_counts"]["workout_detail"] == 1
         exported = json.dumps(data)
-        for forbidden in ("synthetic-private", "12.345678", "23.456789", "latitude", '"user_id"', '"device_id"'):
+        for forbidden in ("synthetic-private", '"user_id"', '"device_id"'):
             assert forbidden not in exported
+        assert data["records"]["datasets"]["workout_gps"]["rows"] == [[12.345678, 23.456789]]
         assert result["maxRead"] <= 262144
         percentages = [item["percent"] for item in result["progress"]]
         assert percentages == sorted(percentages)
@@ -235,12 +236,9 @@ def test_js_and_python_aggregation_semantics_match():
     os.environ.get("MIFIT_RUN_WORKER_STRESS") != "1",
     reason="Optional 282 MiB virtual stress test; set MIFIT_RUN_WORKER_STRESS=1",
 )
-def test_large_virtual_gps_file_is_streamed_without_retaining_values():
+def test_large_virtual_gps_file_refuses_to_silently_truncate_details():
     result = run_cases([{"stressMiB": 282}], timeout=120)[0]
-    assert result["final"]["type"] == "complete"
-    data = result["final"]["data"]
-    assert data["meta"]["source_counts"]["workout_gps"] == result["expectedCount"]
-    assert data["days"] == data["workouts"] == []
+    assert result["final"]["type"] == "error"
+    assert "规模过大" in result["final"]["message"]
     assert result["maxRead"] <= 262144
-    assert result["reads"] > 1000
-    assert "latitude" not in json.dumps(data)
+    assert result["reads"] > 1

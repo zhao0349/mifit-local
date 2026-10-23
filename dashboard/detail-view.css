@@ -118,3 +118,18 @@ body.detail-open{overflow:hidden}
  .detail-pagination{margin-left:auto}
 }
 @media print{#detail-dialog{display:none!important}}
+
+/* Source records share the dialog scroll pane; values never force viewport width. */
+.detail-source-records{border:1px solid var(--border);border-radius:14px;background:var(--panel);padding:20px;margin:18px 0;min-width:0}
+.detail-source-records h3{font-size:15px;margin:0}
+.detail-source-controls{display:flex;flex-wrap:wrap;gap:16px;align-items:center;font-size:12px;margin:16px 0}
+.detail-source-controls label{display:flex;align-items:center;gap:8px;max-width:100%;flex-wrap:wrap}
+.detail-source-controls select{max-width:100%;min-height:36px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px}
+.detail-source-entry{border-top:1px solid var(--border);padding:12px 0}
+.detail-source-entry summary{cursor:pointer;font-size:13px;line-height:1.8;overflow-wrap:anywhere}
+.detail-source-values{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(210px,100%),1fr));gap:16px;margin:18px 0}
+.detail-source-values>div{min-width:0}
+.detail-source-values dt{font-size:12px;line-height:1.6}
+.detail-source-values dt small{display:block;color:var(--muted);font-size:10px;overflow-wrap:anywhere}
+.detail-source-values dd{margin:4px 0 0;font-size:14px;font-weight:600;line-height:1.7;overflow-wrap:anywhere;white-space:pre-wrap}
+.detail-source-records .detail-table-footer{flex-wrap:wrap;gap:10px}

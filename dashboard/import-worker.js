@@ -11,14 +11,17 @@
     "spo2", "stress", "abnormal_heart_beat", "workout_detail", "workout_gps"
   ];
   const SOURCE_SET = new Set(SOURCES);
-  const SKIPPED = new Set(["abnormal_heart_beat", "workout_detail", "workout_gps"]);
+  const SKIPPED = new Set();
+  const RECORDS = globalThis.MiFitRecordModel;
+  const BODY_FIELDS = ["weight_kg","bmi","body_fat_pct","muscle_mass_kg","water_pct","bone_mass_kg","visceral_fat_score","basal_metabolism_kcal","metabolic_age"];
   const STAGES = ["deep", "light", "rem", "awake"];
   const INTRADAY = globalThis.MiFitIntradayModel;
   const FIELDS = [
     "steps", "distance_km", "active_kcal", "active_minutes", "sleep_minutes",
     "sleep_score", "nap_minutes", "heart_rate_avg", "heart_rate_min",
     "heart_rate_max", "resting_hr", "spo2_avg", "stress_avg", "weight_kg",
-    "body_fat_pct", "workout_minutes"
+    "body_fat_pct", "workout_minutes", "bmi", "muscle_mass_kg", "water_pct",
+    "bone_mass_kg", "visceral_fat_score", "basal_metabolism_kcal", "metabolic_age"
   ];
   const NOTES = [
     "数据只在当前浏览器中读取和汇总，不上传网络，不保存原始账号或设备标识。",
@@ -27,8 +30,8 @@
     "主睡眠按醒来日期归日，只取最长的非小睡记录，睡眠分钟使用实际睡着时间。",
     "小睡按醒来日期归日；重叠时间段只保留最长记录的实际睡着时间，再合计不重叠的组。",
     "心率、静息心率、血氧、压力采用有效样本日均值；静息心率仅取 resting 样本。",
-    "体重和体脂取当天最后一次测量，不用其他记录补齐缺失指标；缺失值保留为空。",
-    "运动概览不合并不同来源记录；秒级运动明细、GPS 和异常心跳仅计数，不保留原始值。",
+    "身体成分趋势取当天最后一次测量，缺失指标不从其他记录补齐；导出明细保留当天每次测量。",
+    "导出明细保留各类健康字段和 GPS 坐标，同日多条记录分别展示；账号、设备及服务定位标识不保留。",
     "单日心率保留有效原始采样点，不做平均或抽样；同一时刻的多条记录分别保留。",
     "睡眠阶段保留来源顺序与时长；来源未保留各阶段起止时间，时间轴只作近似排列，剩余时长不定位。"
   ];
@@ -183,7 +186,7 @@
     try { return INTRADAY.normalize(value); }
     catch (error) { fail(error instanceof RangeError ? "limit" : "format"); }
   }
-  function summaryEnvelope(days, workouts, counts, notes, intraday) {
+  function summaryEnvelope(days, workouts, counts, notes, intraday, records) {
     // Even individually finite samples can overflow when durations are added.
     // Keep the public summary contract finite-number-or-null in that case.
     for (const day of days) {
@@ -203,17 +206,19 @@
         range: { start: days.length ? days[0].date : null, end: days.length ? days[days.length - 1].date : null },
         source_counts: counts,
         notes,
-        omitted: ["gps", "account_identifiers", "device_identifiers", "workout_detail_samples", "spo2_stress_raw_samples"]
+        omitted: ["account_identifiers", "device_identifiers", "service_identifiers", "unknown_fields"]
       },
       days,
       workouts,
-      intraday: normalizedIntraday(intraday)
+      intraday: normalizedIntraday(intraday),
+      records: records || new RECORDS.Builder().archive
     };
   }
 
   class Aggregator {
     constructor() {
       this.counts = Object.fromEntries(SOURCES.map(key => [key, 0]));
+      this.records = new RECORDS.Builder();
       this.days = new Map();
       this.activities = new Map();
       this.sleeps = new Map();
@@ -241,6 +246,10 @@
     add(source, row) {
       if (!isObject(row)) fail();
       this.count(source);
+      try { this.records.add(source, row); }
+      catch (error) { fail(error instanceof RangeError ? "limit" : "format"); }
+      const recordDate = RECORDS.day(source, row);
+      if (recordDate) this.day(recordDate);
       if (source === "daily_activity") this.activity(row);
       else if (source === "sleep") this.sleep(row);
       else if (source === "heart_rate" || source === "spo2" || source === "stress") this.metric(source, row);
@@ -343,9 +352,11 @@
       if (!stamp) { this.badDates++; return; }
       if (this.bodyTimes.has(stamp.day) && stamp.order <= this.bodyTimes.get(stamp.day)) return;
       this.bodyTimes.set(stamp.day, stamp.order);
-      Object.assign(this.day(stamp.day), {
-        weight_kg: number(row.weight_kg, true), body_fat_pct: number(row.body_fat_pct, false, 100)
-      });
+      const day = this.day(stamp.day);
+      for (const field of BODY_FIELDS) {
+        day[field] = number(row[field], ["weight_kg", "bmi"].includes(field),
+          ["body_fat_pct", "water_pct"].includes(field) ? 100 : null);
+      }
     }
     workout(row) {
       const stamp = localTime(row.start_at);
@@ -379,7 +390,7 @@
       const notes = NOTES.slice();
       if (this.badDates) notes.push(`有 ${this.badDates} 条记录日期或时间无效，未纳入聚合，原始文件未改动。`);
       if (this.badStages) notes.push(`有 ${this.badStages} 条主睡眠阶段信息不完整，只保留可识别的有效阶段。`);
-      return summaryEnvelope(Array.from(this.days.values()), this.workouts, this.counts, notes, this.intraday);
+      return summaryEnvelope(Array.from(this.days.values()), this.workouts, this.counts, notes, this.intraday, this.records.archive);
     }
   }
 
@@ -637,8 +648,8 @@
       seen.add(item.date);
       const day = blankDay(item.date);
       for (const field of FIELDS) {
-        const positive = ["heart_rate_avg", "heart_rate_min", "heart_rate_max", "resting_hr", "spo2_avg", "weight_kg"].includes(field);
-        const maximum = ["sleep_score", "spo2_avg", "stress_avg", "body_fat_pct"].includes(field) ? 100 : null;
+        const positive = ["heart_rate_avg", "heart_rate_min", "heart_rate_max", "resting_hr", "spo2_avg", "weight_kg", "bmi"].includes(field);
+        const maximum = ["sleep_score", "spo2_avg", "stress_avg", "body_fat_pct", "water_pct"].includes(field) ? 100 : null;
         day[field] = number(item[field], positive, maximum, field === "steps");
       }
       day.workout_count = number(item.workout_count, false, null, true) || 0;
@@ -664,7 +675,7 @@
     return summaryEnvelope(days, workouts, counts, [
       "已导入日汇总摘要，只保留仪表盘支持的字段；原文件中的额外标识和说明未带入。",
       ...NOTES
-    ], input.intraday);
+    ], input.intraday, RECORDS.normalize(input.records));
   }
 
   async function importFile(file, progress) {
@@ -720,7 +731,7 @@
     } catch (error) {
       self.postMessage({
         type: "error",
-        message: error instanceof ImportFailure ? error.message : ERRORS.format
+        message: error instanceof ImportFailure ? error.message : error instanceof RangeError ? ERRORS.limit : ERRORS.format
       });
     } finally {
       busy = false;

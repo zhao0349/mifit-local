@@ -122,7 +122,7 @@ def test_workouts_have_only_approved_fields_and_do_not_invent_pace(database):
     assert summary["workouts"][1]["avg_heart_rate_bpm"] is None
 
 
-def test_no_identifiers_raw_samples_or_gps_leave_aggregator(database):
+def test_health_details_preserve_gps_but_exclude_identifiers(database):
     with sqlite3.connect(database) as connection:
         connection.execute("ALTER TABLE daily_activity ADD COLUMN user_id TEXT")
         connection.execute("ALTER TABLE daily_activity ADD COLUMN device_id TEXT")
@@ -137,8 +137,10 @@ def test_no_identifiers_raw_samples_or_gps_leave_aggregator(database):
     summary = dashboard.build_summary(database)
     text = json.dumps(summary, ensure_ascii=False)
     for forbidden in ("private-account-marker", "private-device-marker", "private-sample-marker",
-                      "12.12345678", "34.12345678", '"user_id"', '"device_id"', '"latitude"'):
+                      '"user_id"', '"device_id"'):
         assert forbidden not in text
+    gps = summary["records"]["datasets"]["workout_gps"]
+    assert gps == {"fields": ["latitude", "longitude"], "rows": [[12.12345678, 34.12345678]]}
     assert summary["meta"]["source_counts"]["workout_gps"] == 1
     assert summary["meta"]["source_counts"]["workout_detail"] == 1
 
@@ -173,7 +175,8 @@ def test_empty_missing_tables_and_invalid_values_are_not_zero_filled(database):
     ])
     summary = dashboard.build_summary(database)
     assert one_day(summary)["heart_rate_avg"] is None
-    assert "sensitive-invalid-date" not in json.dumps(summary)
+    assert "sensitive-invalid-date" not in json.dumps(summary["days"])
+    assert "sensitive-invalid-date" in json.dumps(summary["records"])
     assert any("日期或时间无效" in note for note in summary["meta"]["notes"])
 
 

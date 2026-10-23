@@ -58,7 +58,7 @@ def test_heart_offsets_beijing_milliseconds_order_and_simultaneous_points_preser
         [0, 60, 0], [0, 70, 1], [0, 60, 0], [28800123, 80, 0], [86399999, 75, 0],
     ]
     assert "raw_samples" not in summary["meta"]["omitted"]
-    assert "gps" in summary["meta"]["omitted"]
+    assert "gps" not in summary["meta"]["omitted"]
 
 
 def test_sleep_source_sequence_all_sessions_exact_dedup_only_and_round_trip():

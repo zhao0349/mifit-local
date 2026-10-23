@@ -39,11 +39,16 @@ def render_html(summary: dict) -> str:
                "__DETAIL_SCRIPT__", "__INTRADAY_MODEL__")
     if any(template.count(marker) != 1 for marker in markers):
         raise ValueError("仪表盘模板不完整。")
-    model_source = INTRADAY_MODEL.read_text(encoding="utf-8")
+    record_schema = (ROOT / "dashboard" / "record-schema.json").read_text(encoding="utf-8")
+    record_source = (
+        "globalThis.MiFitRecordSchema = " + record_schema + ";\n"
+        + (ROOT / "dashboard" / "record-data.js").read_text(encoding="utf-8")
+    )
+    model_source = record_source + "\n" + INTRADAY_MODEL.read_text(encoding="utf-8")
     worker_source = (model_source + "\n" + WORKER.read_text(encoding="utf-8")).encode("utf-8")
     worker_encoded = base64.b64encode(worker_source).decode("ascii")
     detail_script = "\n".join(
-        source.read_text(encoding="utf-8") for source in (DETAIL_MODEL, INTRADAY_VIEW, DETAIL_VIEW)
+        source.read_text(encoding="utf-8") for source in (DETAIL_MODEL, INTRADAY_VIEW, ROOT / "dashboard" / "record-view.js", DETAIL_VIEW)
     ).replace("</script", "<\\/script")
     replacements = {
         "__DASHBOARD_DATA__": encoded,
