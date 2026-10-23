@@ -17,6 +17,13 @@
     heart_rate_max: ["最高心率", "次/分", 0, "mean", "heart"],
     weight_kg: ["体重", "kg", 1, "mean", "body"],
     body_fat_pct: ["体脂率", "%", 1, "mean", "body"],
+    bmi: ["BMI", "", 2, "mean", "body"],
+    muscle_mass_kg: ["肌肉量", "kg", 2, "mean", "body"],
+    water_pct: ["体水分率", "%", 2, "mean", "body"],
+    bone_mass_kg: ["骨量", "kg", 2, "mean", "body"],
+    visceral_fat_score: ["内脏脂肪等级", "", 0, "mean", "body"],
+    basal_metabolism_kcal: ["基础代谢", "kcal", 0, "mean", "body"],
+    metabolic_age: ["代谢年龄", "岁", 0, "mean", "body"],
     spo2_avg: ["平均血氧", "%", 1, "mean", "body"],
     stress_avg: ["平均压力", "分", 1, "mean", "body"],
     workout_count: ["运动记录数", "次", 0, "sum", "workouts"],
@@ -38,9 +45,9 @@
   const stageKeys = ["deep", "light", "rem", "awake"];
   const weekdayLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
   const positiveKeys = new Set([
-    "resting_hr", "heart_rate_avg", "heart_rate_min", "heart_rate_max", "weight_kg", "spo2_avg",
+    "resting_hr", "heart_rate_avg", "heart_rate_min", "heart_rate_max", "weight_kg", "bmi", "spo2_avg",
   ]);
-  const percentageKeys = new Set(["sleep_score", "body_fat_pct", "spo2_avg", "stress_avg"]);
+  const percentageKeys = new Set(["sleep_score", "body_fat_pct", "water_pct", "spo2_avg", "stress_avg"]);
   const numeric = value => typeof value === "number" && Number.isFinite(value);
   function metricValue(key, value) {
     if (!numeric(value) || value < 0 || (positiveKeys.has(key) && value <= 0)) return null;

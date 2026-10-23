@@ -11,7 +11,7 @@
     workouts: { label: "运动档案", short: "运动", metric: "workout_minutes", icon: "M4 8v8m4-11v14m8-14v14m4-11v8M8 12h8",
       description: "按类型查看运动记录、训练时长与距离。单次详情只展示档案中实际提供的指标。" },
     body: { label: "身体指标", short: "身体", metric: "weight_kg", icon: "M5 3h14v18H5zM8 7h8M12 7l2 3",
-      description: "体重、体脂、血氧与压力分别查看。最新值来自所选范围内有记录的最后一天。" }
+      description: "体重与各类身体成分可分别查看趋势；日值来自同一次最新测量。下方导出明细保留每次测量、血氧与压力采样。" }
   };
   const STAGES = [
     ["deep", "深睡", "var(--sleep)"], ["light", "浅睡", "#9b91cc"],
@@ -76,10 +76,8 @@
   function notify(text) { window.MiFitDashboard?.notify?.(text); }
   function typeName(type) { return window.MiFitDashboard?.formatType?.(type) || String(type || "其他"); }
   function dataRange(data) {
-    const dates = (data.days || []).map(item => item.date).concat(
-      (data.workouts || []).map(item => item.date),
-      Object.keys(data.intraday?.heart || {}), Object.keys(data.intraday?.sleep || {})
-    ).filter(Boolean).sort();
+    const recordRange = window.MiFitRecordModel.range(data.record_details);
+    const dates = [recordRange.start, recordRange.end].concat(data.days?.map(item => item.date) || [], (data.workouts || []).map(item => item.date)).concat(Object.keys(data.intraday?.heart || {}), Object.keys(data.intraday?.sleep || {})).filter(Boolean).sort();
     return { start: dates[0] || data.meta?.range?.start || "", end: dates.at(-1) || data.meta?.range?.end || "" };
   }
   function validRange(start, end) {
@@ -548,7 +546,7 @@
       activity: [["date", "日期"], ["steps", "步数"], ["distance_km", "活动距离(km)"], ["active_kcal", "活动热量(kcal)"], ["active_minutes", "活动分钟"]],
       sleep: [["date", "日期"], ["sleep_minutes", "主睡眠分钟"], ["sleep_score", "睡眠评分"], ["nap_minutes", "小睡分钟"], ...STAGES.map(([key, label]) => ["stage_" + key, label + "分钟"])],
       heart: [["date", "日期"], ["resting_hr", "静息心率"], ["heart_rate_avg", "平均心率"], ["heart_rate_min", "最小心率"], ["heart_rate_max", "最大心率"]],
-      body: [["date", "日期"], ["weight_kg", "体重(kg)"], ["body_fat_pct", "体脂率(%)"], ["spo2_avg", "血氧(%)"], ["stress_avg", "压力"]],
+      body: [["date", "日期"], ...metricKeys().map(key => [key, meta(key).label + (meta(key).unit ? "(" + meta(key).unit + ")" : "")])],
       workouts: [["date", "日期"], ["start", "开始时间"], ["type", "运动类型"], ["duration_minutes", "时长(分钟)"], ["distance_km", "距离(km)"], ["calories_kcal", "热量(kcal)"], ["avg_heart_rate_bpm", "平均心率"], ["avg_pace_sec_per_km", "配速(秒每公里)"]]
     };
     return definitions[state.category];
@@ -625,7 +623,7 @@
             if (workouts) td.append(el("span", "detail-type", typeName(row.type)));
           } else {
             const value = fieldValue(row, key);
-            td.textContent = key === "avg_pace_sec_per_km" ? pace(value) : fmt(value, /weight|fat|distance|spo2/.test(key) ? 1 : 0);
+            td.textContent = key === "avg_pace_sec_per_km" ? pace(value) : fmt(value, meta(key)?.decimals ?? (/weight|fat|distance|spo2/.test(key) ? 1 : 0));
           }
           tr.append(td);
         });
@@ -726,6 +724,10 @@
           revealPanel(panel);
         }, "detail-button detail-intraday-jump"));
     }
+    body.append(button("查看导出明细 ↓", "detail-jump-records", () => {
+      const panel = document.getElementById("detail-source-records");
+      if (panel) { panel.tabIndex = -1; revealPanel(panel); }
+    }));
     body.append(renderMetrics(), renderFilters(), renderStats(), renderChart());
     const intraday = window.MiFitIntradayView?.render({
       data: state.data, category: state.category, date: state.date,
@@ -743,6 +745,7 @@
     body.append(middle);
     const workout = renderWorkout();
     if (workout) body.append(workout);
+    body.append(window.MiFitRecordView.render({ data: state.data, category: state.category, start: state.start, end: state.end }));
     body.append(renderRecords(), el("p", "detail-footer-note",
       "详情筛选独立于总览；关闭后总览保持原样。周、月趋势仅汇总所选范围内的数据。所有处理和导出都在本地浏览器完成。"));
     scroll.replaceChildren(body);

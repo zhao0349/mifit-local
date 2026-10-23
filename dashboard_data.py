@@ -16,10 +16,13 @@ from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from record_archive import read_archive
+
 ROOT = Path(__file__).resolve().parent
 TIMEZONE = "Asia/Shanghai"
 _BEIJING = timezone(timedelta(hours=8))
 _STAGES = ("deep", "light", "rem", "awake")
+_BODY_FIELDS = ("weight_kg","bmi","body_fat_pct","muscle_mass_kg","water_pct","bone_mass_kg","visceral_fat_score","basal_metabolism_kcal","metabolic_age")
 _TABLES = {
     "daily_activity": "daily_activity",
     "sleep": "sleep_sessions",
@@ -38,9 +41,9 @@ _NOTES = [
     "主睡眠按醒来日期归日，每天只取时长最长的非小睡记录；睡眠分钟使用该记录的实际睡眠时间，阶段不跨记录拼接。",
     "小睡按醒来日期归日；重叠时段每组只取最长记录的实际睡眠时间，再合计互不重叠的组。",
     "心率与血氧忽略非正数；压力的零值有效。日均值按有效样本计算，静息心率只使用标记为 resting 的样本。",
-    "体重及体脂取当天最新一次测量，不向其他日期填补。缺失或无效指标保留为空，空值不代表零。",
+    "身体成分日值取当天最新一次测量，缺失不跨记录补齐；导出明细保留每次测量。",
     "运动按缓存中的每条有效日期记录计数；分钟只合计已提供的时长，不推断合并跨设备运动，也不包含秒级明细和轨迹。",
-    "摘要只保留按日统计及必要的运动概况，不包含账号、设备标识、原始样本或 GPS。",
+    "导出明细保留已知健康字段、原始采样及 GPS 坐标；账号、设备、服务定位标识和未知字段不保留。",
 ]
 
 
@@ -113,7 +116,8 @@ def _blank_day(day):
             "sleep_minutes", "sleep_score", "nap_minutes",
             "heart_rate_avg", "heart_rate_min", "heart_rate_max", "resting_hr",
             "spo2_avg", "stress_avg", "weight_kg", "body_fat_pct",
-            "workout_minutes",
+            "workout_minutes", "bmi", "muscle_mass_kg", "water_pct",
+            "bone_mass_kg", "visceral_fat_score", "basal_metabolism_kcal", "metabolic_age",
         )),
         "sleep_stages": dict.fromkeys(_STAGES),
         "workout_count": 0,
@@ -200,8 +204,8 @@ def _schema(connection):
 def _rows(connection, schema, table, columns):
     if table not in schema:
         return iter(())
-    # Only our fixed allowlist is selected. Account/device IDs and raw detail/GPS
-    # columns never enter Python memory.
+    # Only summary columns are selected here. read_archive separately reads known
+    # health fields for the detail viewer; account/device IDs are never selected.
     selected = ", ".join(
         f'"{name}"' if name in schema[table] else f'NULL AS "{name}"'
         for name in columns
@@ -310,7 +314,7 @@ def _summarize(connection, generated_at=None):
 
     body_times = {}
     for row in _rows(connection, schema, "body_measurements", (
-        "timestamp", "weight_kg", "body_fat_pct",
+        "timestamp", *_BODY_FIELDS,
     )):
         counts["body_measurements"] += 1
         timestamp = _local_time(row["timestamp"])
@@ -321,10 +325,13 @@ def _summarize(connection, generated_at=None):
         if key in body_times and timestamp <= body_times[key]:
             continue
         body_times[key] = timestamp
-        day_record(key).update(
-            weight_kg=_number(row["weight_kg"], positive=True),
-            body_fat_pct=_number(row["body_fat_pct"], maximum=100),
-        )
+        day_record(key).update({
+            field: _number(
+                row[field], positive=field in ("weight_kg", "bmi"),
+                maximum=100 if field in ("body_fat_pct", "water_pct") else None,
+            )
+            for field in _BODY_FIELDS
+        })
 
     workouts = []
     for row in _rows(connection, schema, "workouts", (
@@ -356,7 +363,7 @@ def _summarize(connection, generated_at=None):
         if duration is not None:
             day["workout_minutes"] = (day["workout_minutes"] or 0) + duration
 
-    # Count excluded datasets using SQL only; never read their raw rows.
+    # Count additional datasets; their known health columns are archived below.
     for source in ("abnormal_heart_beat", "workout_detail", "workout_gps"):
         table = _TABLES[source]
         if table in schema:
@@ -366,6 +373,25 @@ def _summarize(connection, generated_at=None):
         notes.append(f"有 {bad_dates} 条记录的日期或时间无效，未纳入日历聚合；原始缓存未改动。")
     if bad_stages:
         notes.append(f"有 {bad_stages} 条主睡眠阶段信息不完整，仅保留可识别的有效阶段。")
+    records = read_archive(connection, _TABLES, schema)
+    # Include dates that only contain GPS, abnormal events or workout samples so
+    # the detail date range can reach them even without a daily summary.
+    for source, dataset in records["datasets"].items():
+        date_key = "date" if source == "daily_activity" else (
+            "end_at" if source == "sleep" else
+            "start_at" if source in ("workouts", "abnormal_heart_beat") else "timestamp"
+        )
+        if date_key not in dataset["fields"]:
+            continue
+        index = dataset["fields"].index(date_key)
+        for row in dataset["rows"]:
+            if source == "daily_activity":
+                key = _calendar_date(row[index])
+            else:
+                stamp = _local_time(row[index])
+                key = stamp.date().isoformat() if stamp else None
+            if key:
+                day_record(key)
     ordered_days = [days[key] for key in sorted(days)]
     return {
         "schema_version": 1,
@@ -378,15 +404,16 @@ def _summarize(connection, generated_at=None):
             },
             "source_counts": counts,
             "notes": notes,
-            "omitted": ["raw_samples", "gps", "account_identifiers"],
+            "omitted": ["account_identifiers", "device_identifiers", "service_identifiers", "unknown_fields"],
         },
+        "record_details": records,
         "days": ordered_days,
         "workouts": sorted(workouts, key=lambda item: (item["date"], item["start"], item["type"])),
     }
 
 
 def build_summary(db_path: Path) -> dict:
-    """Read a consistent, read-only SQLite snapshot with bounded sample memory."""
+    """Read a consistent, read-only SQLite snapshot with a bounded record archive."""
     try:
         path = Path(db_path).expanduser().resolve()
         if not path.is_file():
@@ -432,6 +459,9 @@ def demo_summary() -> dict:
     with closing(sqlite3.connect(":memory:")) as connection:
         connection.row_factory = sqlite3.Row
         connection.executescript(_DEMO_SCHEMA)
+        for field in _BODY_FIELDS:
+            if field not in ("weight_kg", "body_fat_pct"):
+                connection.execute(f'ALTER TABLE body_measurements ADD COLUMN "{field}" REAL')
         for index in range(365):
             if index not in (0, 364) and index % 47 in (19, 20, 21):
                 continue
@@ -503,10 +533,11 @@ def demo_summary() -> dict:
                         )
             if index % 3 == 0:
                 connection.execute(
-                    "INSERT INTO body_measurements VALUES (?,?,?)",
+                    "INSERT INTO body_measurements VALUES (?,?,?,?,?,?,?,?,?,?)",
                     ((midnight + timedelta(hours=7, minutes=30)).isoformat(),
                      round(78 - index / 365 * 4 + rng.gauss(0, 0.35), 1),
-                     round(22 - index / 365 * 2.3 + rng.gauss(0, 0.3), 1)),
+                     round(22 - index / 365 * 2.3 + rng.gauss(0, 0.3), 1),
+                     round(24 - index / 365, 1), 52.4, 56.2, 2.8, 8, 1650, 30),
                 )
             if day.weekday() in (1, 3, 5) and index % 31 != 10:
                 kind = rng.choice(("running", "walking", "cycling", "strength", "swimming", "yoga"))

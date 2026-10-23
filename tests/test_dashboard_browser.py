@@ -75,6 +75,7 @@ def tiny_summary():
             stress_avg=None if resting is None else resting - 40,
         )
         rows.append(row)
+    summary.pop("record_details", None)  # This fixture replaces the demo archive with three summary days.
     summary["days"] = rows
     summary["workouts"] = [
         {
