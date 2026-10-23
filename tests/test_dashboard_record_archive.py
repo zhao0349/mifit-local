@@ -120,6 +120,17 @@ def test_summary_archive_strips_unknown_columns_and_rejects_corrupt_rows():
     assert result["type"] == "error"
 
 
+@pytest.mark.parametrize("field", [["weight_kg"], None, 7, True, {}])
+def test_summary_archive_rejects_non_string_field_names(field):
+    summary = run_document(document({"body_measurements": [
+        {"timestamp": "2026-10-21", "weight_kg": 70},
+    ]}))
+    summary["record_details"]["datasets"]["body_measurements"]["fields"][1] = field
+    result = run_cases([{"text": json.dumps(summary)}])[0]["final"]
+    assert result["type"] == "error"
+    assert "data" not in result
+
+
 def test_late_columns_and_nested_stages_share_the_cell_budget():
     records = {"body_measurements": [
         {"timestamp": "2026-10-21", "weight_kg": 70},

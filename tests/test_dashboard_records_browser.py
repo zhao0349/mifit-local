@@ -103,3 +103,20 @@ def test_gps_workout_samples_invalid_dates_and_literal_text(open_page, render_su
     expect(page.locator(".detail-source-entry")).to_have_count(1)
     page.locator(".detail-source-entry summary").click()
     expect(page.locator('[data-source-field="duration_seconds"] dd')).to_have_text("0")
+
+
+def test_corrupt_archive_columns_do_not_replace_current_data(open_page, render_summary, tmp_path):
+    summary = composition_summary()
+    page = open_page(render_summary(summary))
+    before = page.locator("#dashboard-data").text_content()
+    corrupt = composition_summary()
+    corrupt["record_details"]["datasets"]["body_measurements"]["fields"][1] = ["weight_kg"]
+    source = tmp_path / "synthetic-corrupt-summary.json"
+    source.write_text(json.dumps(corrupt), encoding="utf-8")
+    page.get_by_test_id("import-file").set_input_files(source)
+    expect(page.locator("#toast")).to_contain_text("格式不正确", timeout=15000)
+    assert page.locator("#dashboard-data").text_content() == before
+    open_detail(page, "body", via_api=True)
+    expect(page.locator("#detail-source-count")).to_contain_text("12 / 12")
+    page.locator(".detail-source-entry summary").first.click()
+    expect(page.locator('[data-source-field="weight_kg"] dd').first).to_have_text("70")

@@ -82,7 +82,8 @@
     for (const [source, dataset] of Object.entries(input.datasets)) {
       if (!Object.hasOwn(schema, source)) continue;
       if (!object(dataset) || !Array.isArray(dataset.fields) || !Array.isArray(dataset.rows) ||
-          dataset.fields.length > 256 || new Set(dataset.fields).size !== dataset.fields.length) throw new TypeError("record columns");
+          dataset.fields.length > 256 || dataset.fields.some(key => typeof key !== "string") ||
+          new Set(dataset.fields).size !== dataset.fields.length) throw new TypeError("record columns");
       const columns = dataset.fields.map((key, index) => ({ key, index }))
         .filter(({ key }) => Object.hasOwn(fieldTypes[source], key));
       rowCount += dataset.rows.length;
