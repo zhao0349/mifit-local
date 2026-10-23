@@ -20,7 +20,7 @@
 
 ## Windows 桌面安装
 
-需要 Windows、Python 3.11 或更新版本（含 Tk）、Git、PowerShell 7 和 Microsoft Edge。桌面凭证存储仅支持 Windows。
+需要 Windows、Python 3.11 或更新版本（含 Tk）、Git、PowerShell 7 和 Microsoft Edge。建议使用已用于本地验证和 CI 的 Python 3.14；其他 Python 版本尚未完成同等验证。桌面凭证存储仅支持 Windows。
 
 在 PowerShell 7 中执行：
 
