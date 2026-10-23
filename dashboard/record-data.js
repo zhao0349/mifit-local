@@ -59,6 +59,7 @@
       if (!dataset) dataset = this.archive.datasets[source] = { fields: [], rows: [] };
       for (const [key] of schema[source].fields) {
         if (Object.hasOwn(row, key) && !dataset.fields.includes(key)) {
+          if (this.cells + dataset.rows.length > MAX_CELLS) throw new RangeError("record limit");
           dataset.fields.push(key);
           this.cells += dataset.rows.length;
           for (const previous of dataset.rows) previous.push(null);

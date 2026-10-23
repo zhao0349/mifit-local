@@ -118,3 +118,18 @@ def test_summary_archive_strips_unknown_columns_and_rejects_corrupt_rows():
     dataset["rows"][0].pop()
     result = run_cases([{"text": json.dumps(summary)}])[0]["final"]
     assert result["type"] == "error"
+
+
+def test_late_columns_and_nested_stages_share_the_cell_budget():
+    records = {"body_measurements": [
+        {"timestamp": "2026-10-21", "weight_kg": 70},
+        {"timestamp": "2026-10-21", "weight_kg": 71},
+        {"timestamp": "2026-10-21", "weight_kg": 72, "bmi": 23, "water_pct": 56},
+    ]}
+    stages = {"sleep": [{"end_at": "2026-10-21", "stages": [
+        {"stage": "light", "minutes": 10} for _ in range(4)
+    ]}]}
+    for payload in (document(records), document(stages)):
+        result = run_cases([{"text": json.dumps(payload), "cellLimit": 6}])[0]["final"]
+        assert result["type"] == "error"
+        assert "规模过大" in result["message"]
