@@ -35,7 +35,7 @@
     const match = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:[.,]\d{1,9})?)?(Z|[+-]\d{2}:\d{2})?)?$/.exec(raw);
     if (!match) return null;
     const date = match[1], parsed = new Date(date + "T00:00:00Z");
-    if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date ||
+    if (Number(date.slice(0, 4)) < 1 || !Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date ||
         Number(match[2] || 0) > 23 || Number(match[3] || 0) > 59 || Number(match[4] || 0) > 59) return null;
     if (source === "daily_activity") return raw === date ? date : null;
     let offset = 480;

@@ -105,7 +105,7 @@ __DETAIL_STYLES__
 (()=>{
 const $=id=>document.getElementById(id), $$=s=>[...document.querySelectorAll(s)];
 const raw=JSON.parse($("dashboard-data").textContent);
-const data={meta:raw.meta||{},days:Array.isArray(raw.days)?raw.days:[],workouts:Array.isArray(raw.workouts)?raw.workouts:[],intraday:window.MiFitIntradayModel.normalize(raw.intraday),records:window.MiFitRecordModel.normalize(raw.records)};
+const data={meta:raw.meta||{},days:Array.isArray(raw.days)?raw.days:[],workouts:Array.isArray(raw.workouts)?raw.workouts:[],intraday:window.MiFitIntradayModel.normalize(raw.intraday),record_details:window.MiFitRecordModel.normalize(raw.record_details)};
 const validDate=s=>typeof s==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(s)&&Number.isFinite(Date.parse(s+"T00:00:00Z"))&&new Date(s+"T00:00:00Z").toISOString().slice(0,10)===s;
 data.days=data.days.filter(d=>d&&validDate(d.date)).sort((a,b)=>a.date.localeCompare(b.date));
 data.workouts=data.workouts.filter(w=>w&&validDate(w.date)).sort((a,b)=>(b.date+(b.start||"")).localeCompare(a.date+(a.start||"")));
@@ -179,7 +179,7 @@ document.addEventListener("click",event=>{
 document.addEventListener("keydown",event=>{
  if(event.target instanceof Element&&event.target.matches("[data-detail-open][role=button]")&&(event.key==="Enter"||event.key===" ")){event.preventDefault();openDetailEntry(event.target);}
 });
-function archiveDates(){const range=window.MiFitRecordModel.range(data.records);return [range.start,range.end,...data.days.map(d=>d.date),...data.workouts.map(w=>w.date),...Object.keys(data.intraday.heart),...Object.keys(data.intraday.sleep)].filter(Boolean).sort();}
+function archiveDates(){const range=window.MiFitRecordModel.range(data.record_details);return [range.start,range.end,...data.days.map(d=>d.date),...data.workouts.map(w=>w.date),...Object.keys(data.intraday.heart),...Object.keys(data.intraday.sleep)].filter(Boolean).sort();}
 let allDates=archiveDates();
 const today=new Date(Date.now()+8*60*60*1000).toISOString().slice(0,10);
 let first=allDates[0]||today,last=allDates.at(-1)||today;
@@ -239,8 +239,8 @@ function adoptSummary(payload){
  const nextDays=payload.days.filter(d=>d&&validDate(d.date)).map(d=>{const row={date:d.date,sleep_stages:{}};dailyKeys.forEach(k=>row[k]=num(d[k])?d[k]:null);["deep","light","rem","awake"].forEach(k=>row.sleep_stages[k]=num(d.sleep_stages?.[k])?d.sleep_stages[k]:null);return row;}).sort((a,b)=>a.date.localeCompare(b.date));
  const nextWorkouts=payload.workouts.filter(w=>w&&validDate(w.date)).map(w=>{const item={date:w.date,start:/^\d{2}:\d{2}$/.test(w.start||"")?w.start:"",type:String(w.type||"other").slice(0,120)};["duration_minutes","distance_km","calories_kcal","avg_heart_rate_bpm","avg_pace_sec_per_km"].forEach(k=>item[k]=num(w[k])?w[k]:null);return item;}).sort((a,b)=>(b.date+b.start).localeCompare(a.date+a.start));
  const nextIntraday=window.MiFitIntradayModel.normalize(payload.intraday);
- const nextRecords=window.MiFitRecordModel.normalize(payload.records);
- data.days=nextDays;data.workouts=nextWorkouts;data.intraday=nextIntraday;data.records=nextRecords;data.meta={generated_at:String(payload.meta?.generated_at||"").slice(0,40),timezone:"Asia/Shanghai",synthetic:payload.meta?.synthetic===true,notes:Array.isArray(payload.meta?.notes)?payload.meta.notes.filter(n=>typeof n==="string").slice(0,30).map(n=>n.slice(0,2000)):[],source_counts:{},omitted:["account_identifiers","device_identifiers","service_identifiers","unknown_fields"]};
+ const nextRecords=window.MiFitRecordModel.normalize(payload.record_details);
+ data.days=nextDays;data.workouts=nextWorkouts;data.intraday=nextIntraday;data.record_details=nextRecords;data.meta={generated_at:String(payload.meta?.generated_at||"").slice(0,40),timezone:"Asia/Shanghai",synthetic:payload.meta?.synthetic===true,notes:Array.isArray(payload.meta?.notes)?payload.meta.notes.filter(n=>typeof n==="string").slice(0,30).map(n=>n.slice(0,2000)):[],source_counts:{},omitted:["account_identifiers","device_identifiers","service_identifiers","unknown_fields"]};
  for(const [k,v] of Object.entries(payload.meta?.source_counts||{}))if(/^[a-z_]{1,40}$/.test(k)&&num(v)&&v>=0)data.meta.source_counts[k]=v;
  dayMap.clear();data.days.forEach(d=>dayMap.set(d.date,d));allDates=archiveDates();first=allDates[0]||today;last=allDates.at(-1)||today;data.meta.range={start:first,end:last};state.selected=last;state.workoutType="all";
  const safeJSON=JSON.stringify({schema_version:1,...data}).replaceAll("&","\\u0026").replaceAll("<","\\u003c").replaceAll(">","\\u003e").replaceAll("\u2028","\\u2028").replaceAll("\u2029","\\u2029");

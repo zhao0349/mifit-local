@@ -40,7 +40,7 @@
     const select = el("select");
     select.id = "detail-source-select";
     for (const key of sources) {
-      const option = el("option", "", model.schema[key].label + " · " + (data.records?.datasets?.[key]?.rows.length || 0) + " 条");
+      const option = el("option", "", model.schema[key].label + " · " + (data.record_details?.datasets?.[key]?.rows.length || 0) + " 条");
       option.value = key;
       select.append(option);
     }
@@ -61,7 +61,7 @@
     panel.append(summary, content, footer);
     let page = 0, indices = [], dataset, fields, invalidCount = 0;
     function filter() {
-      dataset = data.records?.datasets?.[preference.source];
+      dataset = data.record_details?.datasets?.[preference.source];
       fields = dataset ? dataset.fields.map(key => model.schema[preference.source].fields.find(field => field[0] === key)) : [];
       indices = [];
       invalidCount = 0;

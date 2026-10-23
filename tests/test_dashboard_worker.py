@@ -73,7 +73,7 @@ def test_chunks_unicode_escapes_structure_and_identity_filtering():
         exported = json.dumps(data)
         for forbidden in ("synthetic-private", '"user_id"', '"device_id"'):
             assert forbidden not in exported
-        assert data["records"]["datasets"]["workout_gps"]["rows"] == [[12.345678, 23.456789]]
+        assert data["record_details"]["datasets"]["workout_gps"]["rows"] == [[12.345678, 23.456789]]
         assert result["maxRead"] <= 262144
         percentages = [item["percent"] for item in result["progress"]]
         assert percentages == sorted(percentages)

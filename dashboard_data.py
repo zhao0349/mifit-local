@@ -406,7 +406,7 @@ def _summarize(connection, generated_at=None):
             "notes": notes,
             "omitted": ["account_identifiers", "device_identifiers", "service_identifiers", "unknown_fields"],
         },
-        "records": records,
+        "record_details": records,
         "days": ordered_days,
         "workouts": sorted(workouts, key=lambda item: (item["date"], item["start"], item["type"])),
     }

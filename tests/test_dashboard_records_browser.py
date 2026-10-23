@@ -39,7 +39,15 @@ def test_body_details_preserve_every_measurement_precision_and_pagination(
     open_page, render_summary, tmp_path, width
 ):
     summary = composition_summary()
-    page = open_page(render_summary(summary), width=width)
+    raw = {
+        source: [dict(zip(dataset["fields"], row, strict=True)) for row in dataset["rows"]]
+        for source, dataset in summary["record_details"]["datasets"].items()
+    }
+    original = tmp_path / "synthetic-composition-export.json"
+    original.write_text(json.dumps(document(raw)), encoding="utf-8")
+    page = open_page(render_summary(), width=width)
+    page.get_by_test_id("import-file").set_input_files(original)
+    expect(page.locator("#toast")).to_contain_text("导入完成", timeout=15000)
     open_detail(page, "body", "muscle_mass_kg", via_api=True)
     expect(page.locator("#detail-day-muscle_mass_kg strong")).to_have_attribute("data-value", "51.12345")
     page.locator("#detail-jump-records").click()
@@ -69,13 +77,13 @@ def test_body_details_preserve_every_measurement_precision_and_pagination(
     open_detail(reopened, "body", via_api=True)
     expect(reopened.locator("#detail-source-count")).to_contain_text("12 / 12")
     payload = json.loads(reopened.locator("#dashboard-data").text_content())
-    assert payload["records"] == summary["records"]
+    assert payload["record_details"] == summary["record_details"]
 
 
 def test_gps_workout_samples_invalid_dates_and_literal_text(open_page, render_summary):
     summary = composition_summary()
-    summary["records"]["datasets"]["workout_gps"]["fields"].append("collected_at")
-    summary["records"]["datasets"]["workout_gps"]["rows"][0].append('<img src=x onerror=alert(1)>')
+    summary["record_details"]["datasets"]["workout_gps"]["fields"].append("collected_at")
+    summary["record_details"]["datasets"]["workout_gps"]["rows"][0].append('<img src=x onerror=alert(1)>')
     page = open_page(render_summary(summary))
     open_detail(page, "workouts", via_api=True)
     page.locator("#detail-source-select").select_option("workout_gps")

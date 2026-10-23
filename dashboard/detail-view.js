@@ -76,7 +76,7 @@
   function notify(text) { window.MiFitDashboard?.notify?.(text); }
   function typeName(type) { return window.MiFitDashboard?.formatType?.(type) || String(type || "其他"); }
   function dataRange(data) {
-    const recordRange = window.MiFitRecordModel.range(data.records);
+    const recordRange = window.MiFitRecordModel.range(data.record_details);
     const dates = [recordRange.start, recordRange.end].concat(data.days?.map(item => item.date) || [], (data.workouts || []).map(item => item.date)).concat(Object.keys(data.intraday?.heart || {}), Object.keys(data.intraday?.sleep || {})).filter(Boolean).sort();
     return { start: dates[0] || data.meta?.range?.start || "", end: dates.at(-1) || data.meta?.range?.end || "" };
   }
@@ -623,7 +623,7 @@
             if (workouts) td.append(el("span", "detail-type", typeName(row.type)));
           } else {
             const value = fieldValue(row, key);
-            td.textContent = key === "avg_pace_sec_per_km" ? pace(value) : fmt(value, /weight|fat|distance|spo2/.test(key) ? 1 : 0);
+            td.textContent = key === "avg_pace_sec_per_km" ? pace(value) : fmt(value, meta(key)?.decimals ?? (/weight|fat|distance|spo2/.test(key) ? 1 : 0));
           }
           tr.append(td);
         });

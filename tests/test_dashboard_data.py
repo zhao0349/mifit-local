@@ -139,7 +139,7 @@ def test_health_details_preserve_gps_but_exclude_identifiers(database):
     for forbidden in ("private-account-marker", "private-device-marker", "private-sample-marker",
                       '"user_id"', '"device_id"'):
         assert forbidden not in text
-    gps = summary["records"]["datasets"]["workout_gps"]
+    gps = summary["record_details"]["datasets"]["workout_gps"]
     assert gps == {"fields": ["latitude", "longitude"], "rows": [[12.12345678, 34.12345678]]}
     assert summary["meta"]["source_counts"]["workout_gps"] == 1
     assert summary["meta"]["source_counts"]["workout_detail"] == 1
@@ -176,7 +176,7 @@ def test_empty_missing_tables_and_invalid_values_are_not_zero_filled(database):
     summary = dashboard.build_summary(database)
     assert one_day(summary)["heart_rate_avg"] is None
     assert "sensitive-invalid-date" not in json.dumps(summary["days"])
-    assert "sensitive-invalid-date" in json.dumps(summary["records"])
+    assert "sensitive-invalid-date" in json.dumps(summary["record_details"])
     assert any("日期或时间无效" in note for note in summary["meta"]["notes"])
 
 

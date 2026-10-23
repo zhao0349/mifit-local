@@ -67,7 +67,9 @@ async function run(testCase) {
   const sandbox = { TextDecoder, self: { postMessage: message => messages.push(message) } };
   vm.createContext(sandbox);
   const recordSchema = fs.readFileSync(path.join(__dirname, "..", "dashboard", "record-schema.json"), "utf8");
-  const recordSource = fs.readFileSync(path.join(__dirname, "..", "dashboard", "record-data.js"), "utf8");
+  const recordSource = fs.readFileSync(path.join(__dirname, "..", "dashboard", "record-data.js"), "utf8")
+    .replace("const MAX_ROWS = 2000000;", testCase.recordLimit ?
+      "const MAX_ROWS = " + Number(testCase.recordLimit) + ";" : "const MAX_ROWS = 2000000;");
   vm.runInContext("globalThis.MiFitRecordSchema = " + recordSchema + ";\n" + recordSource, sandbox, { timeout: 2000 });
   vm.runInContext(intradaySource, sandbox, { timeout: 2000 });
   vm.runInContext(source, sandbox, { timeout: 2000 });

@@ -211,7 +211,7 @@
       days,
       workouts,
       intraday: normalizedIntraday(intraday),
-      records: records || new RECORDS.Builder().archive
+      record_details: records || new RECORDS.Builder().archive
     };
   }
 
@@ -675,7 +675,7 @@
     return summaryEnvelope(days, workouts, counts, [
       "已导入日汇总摘要，只保留仪表盘支持的字段；原文件中的额外标识和说明未带入。",
       ...NOTES
-    ], input.intraday, RECORDS.normalize(input.records));
+    ], input.intraday, RECORDS.normalize(input.record_details));
   }
 
   async function importFile(file, progress) {

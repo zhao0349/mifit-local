@@ -6,11 +6,11 @@ import sqlite3
 import pytest
 
 import dashboard_data
-from test_dashboard_worker import document, run_document
+from test_dashboard_worker import document, run_cases, run_document
 
 
 def unpack(summary, source):
-    dataset = summary["records"]["datasets"][source]
+    dataset = summary["record_details"]["datasets"][source]
     return [dict(zip(dataset["fields"], row, strict=True)) for row in dataset["rows"]]
 
 
@@ -29,7 +29,7 @@ def test_body_composition_all_measurements_and_summary_round_trip():
     day = summary["days"][0]
     assert day["weight_kg"] == 71 and day["bmi"] == 23
     assert day["water_pct"] is None and day["muscle_mass_kg"] is None
-    assert run_document(summary)["records"] == summary["records"]
+    assert run_document(summary)["record_details"] == summary["record_details"]
 
 
 def test_all_datasets_known_columns_signed_values_and_identifiers():
@@ -55,7 +55,7 @@ def test_all_datasets_known_columns_signed_values_and_identifiers():
         assert set(row) == {field[0] for field in definition["fields"]}
         assert row == {key: records[source][0][key] for key in row}
     assert "PRIVATE_SENTINEL" not in json.dumps(summary)
-    assert run_document(summary)["records"] == summary["records"]
+    assert run_document(summary)["record_details"] == summary["record_details"]
 
 
 def test_detail_only_dates_and_invalid_dates_are_not_lost():
@@ -80,7 +80,7 @@ def test_sqlite_composition_archive_matches_importer_without_mutating_database(t
     before = path.read_bytes()
     py = dashboard_data.build_summary(path)
     js = run_document(document({"body_measurements": unpack(py, "body_measurements")}))
-    assert js["records"] == py["records"]
+    assert js["record_details"] == py["record_details"]
     assert js["days"] == py["days"]
     assert path.read_bytes() == before
     assert "PRIVATE_SENTINEL" not in json.dumps(py)
@@ -92,3 +92,29 @@ def test_invalid_composition_does_not_become_valid_trend(value):
         {"timestamp": "2026-10-21", "water_pct": value, "weight_kg": 70},
     ]}))
     assert summary["days"][0]["water_pct"] is None
+
+
+def test_raw_and_summary_archives_enforce_limits_without_partial_success():
+    source = document({"body_measurements": [
+        {"timestamp": "2026-10-21", "weight_kg": 70},
+        {"timestamp": "2026-10-21", "weight_kg": 71},
+    ]})
+    summary = run_document(source)
+    for payload in (source, summary):
+        result = run_cases([{"text": json.dumps(payload), "recordLimit": 1}])[0]["final"]
+        assert result["type"] == "error"
+        assert "规模过大" in result["message"]
+        assert "data" not in result
+
+
+def test_summary_archive_strips_unknown_columns_and_rejects_corrupt_rows():
+    summary = run_document(document({"body_measurements": [
+        {"timestamp": "2026-10-21", "weight_kg": 70},
+    ]}))
+    dataset = summary["record_details"]["datasets"]["body_measurements"]
+    dataset["fields"].append("user_id")
+    dataset["rows"][0].append("PRIVATE_SENTINEL")
+    assert "PRIVATE_SENTINEL" not in json.dumps(run_document(summary))
+    dataset["rows"][0].pop()
+    result = run_cases([{"text": json.dumps(summary)}])[0]["final"]
+    assert result["type"] == "error"
