@@ -126,7 +126,7 @@ class RecordAdapter(FakeAdapter):
 
 
 @pytest.mark.asyncio
-async def test_sync_default_upserts_and_retains_unrequested_days(isolated, monkeypatch):
+async def test_sync_skips_verified_days_and_retains_unrequested_days(isolated, monkeypatch):
     path, db = cache()
     db.insert_daily_activity(activity("2025-12-01", 10))
     adapter = RecordAdapter([activity("2026-01-01", 100)])
@@ -135,9 +135,10 @@ async def test_sync_default_upserts_and_retains_unrequested_days(isolated, monke
     first = await backend.sync("2026-01-01", "2026-01-01", lambda _: None)
     adapter.rows = [activity("2026-01-01", 200)]
     second = await backend.sync("2026-01-01", "2026-01-01", lambda _: None)
-    assert first["added"] == 1 and second["updated"] == 1
+    assert first["added"] == 1 and second["updated"] == 0
+    assert second["skipped_days"] == 1
     rows = Database(path).query_daily_activity("123456", "2025-01-01", "2026-12-31")
-    assert [(row["date"], row["steps"]) for row in rows] == [("2025-12-01", 10), ("2026-01-01", 200)]
+    assert [(row["date"], row["steps"]) for row in rows] == [("2025-12-01", 10), ("2026-01-01", 100)]
 
 
 @pytest.mark.asyncio

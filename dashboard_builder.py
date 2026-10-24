@@ -54,7 +54,11 @@ def render_html(summary: dict, *, local_token: str | None = None) -> str:
         "__DASHBOARD_DATA__": encoded,
         "__IMPORT_WORKER__": worker_encoded,
         "__DETAIL_STYLES__": "\n".join(
-            source.read_text(encoding="utf-8") for source in (DETAIL_STYLES, INTRADAY_STYLES)
+            source.read_text(encoding="utf-8") for source in (
+                DETAIL_STYLES, INTRADAY_STYLES, ROOT / "dashboard" / "console-shell.css",
+                ROOT / "dashboard" / "date-picker.css",
+                ROOT / "dashboard" / "select-picker.css",
+            )
         ),
         "__DETAIL_SCRIPT__": detail_script,
         "__INTRADAY_MODEL__": model_source.replace("</script", "<\\/script"),
@@ -62,11 +66,17 @@ def render_html(summary: dict, *, local_token: str | None = None) -> str:
     # Substitute template markers once, never markers that happen to occur in data.
     document = re.sub("|".join(re.escape(marker) for marker in markers),
                       lambda match: replacements[match.group()], template)
+    for component in ("date-picker.js", "select-picker.js"):
+        script = (ROOT / "dashboard" / component).read_text(encoding="utf-8")
+        document = document.replace("</body>", '<script>\n' + script.replace("</script", "<\\/script")
+                                    + "\n</script>\n</body>", 1)
     if local_token is not None:
         if not re.fullmatch(r"[A-Za-z0-9_-]{43}", local_token):
             raise ValueError("Invalid local session token")
         panel = (ROOT / "dashboard" / "local-panel.html").read_text(encoding="utf-8")
         script = (ROOT / "dashboard" / "local-control.js").read_text(encoding="utf-8")
+        styles = (ROOT / "dashboard" / "local-control.css").read_text(encoding="utf-8")
+        document = document.replace("</head>", '<style data-local-only>\n' + styles + "\n</style>\n</head>", 1)
         document = document.replace("connect-src 'none'", "connect-src 'self'", 1)
         document = document.replace('<!-- local-control-panel -->', panel, 1)
         document = document.replace("</body>",
