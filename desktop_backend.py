@@ -1,4 +1,4 @@
-"""Local desktop orchestration for the separately installed Mi Fitness bridge.
+"""Local service orchestration for the separately installed Mi Fitness bridge.
 
 Importing this module does not read credentials, create files, or access the network.
 Only ``sync`` accesses Xiaomi; tests and ``smoke_demo`` use synthetic records.
@@ -19,6 +19,8 @@ from contextlib import closing, suppress
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
+
+from sync_coverage import SyncCoverage
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -41,7 +43,7 @@ DATA_TYPES = {
     "workout_detail": "运动明细及轨迹",
 }
 _operation_lock = threading.Lock()
-# Serializes whole user actions across the desktop and its local web interface,
+# Serializes whole user actions across browser tabs of the local web interface,
 # including login and cache reads. Backend sync/export retain their own lock.
 interface_lock = threading.Lock()
 Emit = Callable[[str], None]
@@ -260,14 +262,14 @@ def _new_adapter(user_id: str, token: str, region: str):
 def _type_result() -> dict:
     return {
         "status": "pending", "added": 0, "updated": 0, "skipped": 0,
-        "failed_chunks": 0, "completed_chunks": 0,
+        "failed_chunks": 0, "completed_chunks": 0, "skipped_days": 0,
     }
 
 
 def _summarize(types: dict) -> dict:
     all_ok = all(item["status"] == "ok" for item in types.values())
     useful = any(
-        item["completed_chunks"] or item["added"] or item["updated"]
+        item["completed_chunks"] or item["added"] or item["updated"] or item["skipped_days"]
         for item in types.values()
     )
     status = "ok" if all_ok else ("partial" if useful else "error")
@@ -275,7 +277,7 @@ def _summarize(types: dict) -> dict:
         "status": status,
         "all_ok": all_ok,
         "partial": status == "partial",
-        **{key: sum(item[key] for item in types.values()) for key in ("added", "updated", "skipped")},
+        **{key: sum(item[key] for item in types.values()) for key in ("added", "updated", "skipped", "skipped_days")},
         "types": types,
     }
 
@@ -313,8 +315,19 @@ def _replace_database(source_path: Path, target_path: Path) -> None:
         source.backup(target)
 
 
+def _enable_cache_wal(path: Path) -> None:
+    """Keep committed cache pages readable after an interrupted writer.
+
+    WAL mode persists for later upstream connections, whose SQLite default is
+    synchronous=FULL. SQLite owns recovery/checkpointing; never remove its logs.
+    """
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=rw", uri=True)) as connection:
+        if connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
+            raise DesktopError("无法启用数据库写入保护，请关闭其他占用数据库的程序后重试。")
+
+
 async def sync(start: str, end: str, emit: Emit, *, mode="merge", expected_account=None) -> dict:
-    """Upsert by default. Explicit replacement publishes only a complete sync.
+    """Skip completed days by default; upsert missing or still-open dates.
 
     Replacement is bound to the account confirmed by the caller. Failures and
     cancellation discard staging and leave that account's existing cache intact.
@@ -335,7 +348,8 @@ async def sync(start: str, end: str, emit: Emit, *, mode="merge", expected_accou
             target.parent.mkdir(parents=True, exist_ok=True)
             staging = _inside(target.parent / f".replace-{uuid4().hex}.db")
             emit("覆盖模式：先获取所选日期，全部成功后才替换当前账号历史。")
-        result = await _sync_account(start, end, emit, credentials, staging or target)
+        result = await _sync_account(start, end, emit, credentials, staging or target,
+                                     protect_writes=staging is None)
         result["mode"] = mode
         result["committed"] = mode == "merge"
         if staging:
@@ -367,7 +381,22 @@ async def sync(start: str, end: str, emit: Emit, *, mode="merge", expected_accou
             _operation_lock.release()
 
 
-async def _sync_account(start, end, emit, credentials, db_path) -> dict:
+def _workout_details_pending(db_path, user_id, start, end):
+    """Use the upstream per-workout cache rule before opening a cloud session."""
+    if not db_path.exists():
+        return False, 0
+    with closing(sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)) as connection:
+        rows = connection.execute(
+            "SELECT w.fds_sid, w.report_time, "
+            "EXISTS(SELECT 1 FROM workout_detail_samples s WHERE s.user_id=w.user_id AND s.workout_id=w.workout_id), "
+            "EXISTS(SELECT 1 FROM workout_gps_points g WHERE g.user_id=w.user_id AND g.workout_id=w.workout_id) "
+            "FROM workouts w WHERE w.user_id=? AND substr(w.start_at,1,10) BETWEEN ? AND ?",
+            (user_id, start, end),
+        ).fetchall()
+    return any(sid and report and not (samples or gps) for sid, report, samples, gps in rows), len(rows)
+
+
+async def _sync_account(start, end, emit, credentials, db_path, *, protect_writes=True) -> dict:
     """Fetch into one account database; caller owns the operation lock."""
     adapter = None
     try:
@@ -375,26 +404,43 @@ async def _sync_account(start, end, emit, credentials, db_path) -> dict:
         from mi_fitness_mcp.storage import Database
 
         user_id, token, settings = credentials
-        adapter = _new_adapter(user_id, token, settings["region"])
         types = {name: _type_result() for name in DATA_TYPES}
-        emit("正在连接小米云端。")
-        try:
-            connected = await asyncio.wait_for(adapter.connect(), timeout=90)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            connected = False
-        if not connected or adapter.get_user_id() != user_id:
-            for item in types.values():
-                item["status"] = "error"
-            emit("连接失败或账号不匹配，请检查凭据、地区及网络后重试。")
-            return _summarize(types)
-        database = _AccountDatabase(Database(db_path), user_id)
-        service = SyncService(adapter, database, chunk_days=7)
-        ranges = list(_chunks(start, end))
+        coverage = SyncCoverage(db_path, datetime.now(_LOCAL_OFFSET).date())
+        service = None
+        emit("正在检查本地已完整同步的日期。")
         for name, label in DATA_TYPES.items():
             item = types[name]
+            if name == "workout_detail":
+                pending, cached = _workout_details_pending(db_path, user_id, start, end)
+                ranges = list(_chunks(start, end)) if pending else []
+                if not pending:
+                    item["skipped"] = cached
+            else:
+                ranges, item["skipped_days"] = coverage.pending(name, start, end)
+                if item["skipped_days"]:
+                    emit(f"{label}：已完整缓存 {item['skipped_days']} 天，直接跳过。")
             for number, (chunk_start, chunk_end) in enumerate(ranges, 1):
+                if service is None:
+                    adapter = _new_adapter(user_id, token, settings["region"])
+                    emit("正在连接小米云端。")
+                    try:
+                        connected = await asyncio.wait_for(adapter.connect(), timeout=90)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        connected = False
+                    if not connected or adapter.get_user_id() != user_id:
+                        for remaining in types.values():
+                            if remaining["status"] == "pending":
+                                remaining["status"] = "error"
+                        emit("连接失败或账号不匹配，请检查凭据、地区及网络后重试。")
+                        return _summarize(types)
+                    database = _AccountDatabase(Database(db_path), user_id)
+                    # Replacement writes only a disposable staging database;
+                    # keep it self-contained until the atomic backup publishes it.
+                    if protect_writes:
+                        _enable_cache_wal(db_path)
+                    service = SyncService(adapter, database, chunk_days=7)
                 emit(f"正在同步{label}：第 {number}/{len(ranges)} 块。")
                 try:
                     result = await asyncio.wait_for(
@@ -421,10 +467,12 @@ async def _sync_account(start, end, emit, credentials, db_path) -> dict:
                     return _summarize(types)
                 if failed:
                     emit(f"{label}有一块未完整同步；已保留此前写入的数据。")
+                elif name != "workout_detail":
+                    coverage.complete(name, chunk_start, chunk_end)
                 await asyncio.sleep(0)
             item["status"] = (
                 "ok" if not item["failed_chunks"]
-                else "partial" if item["completed_chunks"] or item["added"] or item["updated"]
+                else "partial" if item["completed_chunks"] or item["added"] or item["updated"] or item["skipped_days"]
                 else "error"
             )
             emit(

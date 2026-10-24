@@ -28,8 +28,6 @@ jobs:
         with:
           node-version: '22'
       - run: python -m pip install -r requirements-dev.txt
-      - name: Check Windows Tk runtime
-        run: python -c "import tkinter; root = tkinter.Tk(); root.withdraw(); print('Tcl/Tk', root.tk.call('info', 'patchlevel')); root.destroy()"
       - run: python -m ruff check .
       - run: python dashboard_builder.py --demo --output dashboard/demo/健康仪表盘.html
       - run: python -m pytest tests -q
