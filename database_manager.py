@@ -19,6 +19,7 @@ from pathlib import Path
 
 import desktop_backend as backend
 from dashboard_data import build_summary
+from sync_coverage import TABLE as SYNC_COVERAGE_TABLE
 
 
 # Categories are whole CSV datasets; related detail tables cannot be selected
@@ -144,11 +145,12 @@ def _schema(connection) -> set[str]:
     entries = connection.execute(
         "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
     ).fetchall()
-    known = {table for entries in TABLES.values() for table, _ in entries} | {"sync_state"}
+    health_tables = {table for entries in TABLES.values() for table, _ in entries}
+    known = health_tables | {"sync_state", SYNC_COVERAGE_TABLE}
     tables = {name for kind, name in entries if kind == "table"}
     if tables - known or any(kind in ("view", "trigger") for kind, _ in entries):
         raise backend.DesktopError("数据库结构不受支持，未执行删除。")
-    if not tables.intersection(known - {"sync_state"}):
+    if not tables.intersection(health_tables):
         raise backend.DesktopError("数据库不包含可识别的健康记录表。")
     for entries in TABLES.values():
         for table, column in entries:
@@ -424,14 +426,21 @@ class DatabaseManager:
                                 f'DELETE FROM "{table}" WHERE rowid IN '
                                 '(SELECT record_rowid FROM mifit_delete_rows WHERE table_name=?)', (table,),
                             )
-                        if "sync_state" in tables:
-                            sync_types = set(plan.categories)
-                            if "heart_rate" in sync_types:
-                                sync_types.add("abnormal_heart_beat")
-                            if "workouts" in sync_types:
-                                sync_types.update(("workout_detail", "workout_gps"))
-                            placeholders = ",".join("?" for _ in sync_types)
-                            connection.execute(f"DELETE FROM sync_state WHERE data_type IN ({placeholders})", sorted(sync_types))
+                        sync_types = set(plan.categories)
+                        if "heart_rate" in sync_types:
+                            sync_types.add("abnormal_heart_beat")
+                        if "workouts" in sync_types:
+                            sync_types.update(("workout_detail", "workout_gps"))
+                        placeholders = ",".join("?" for _ in sync_types)
+                        # Invalidate the selected types as a whole: deletion uses
+                        # waking dates for sleep, while cloud requests may use a
+                        # different date boundary. Unselected types stay cached.
+                        for table in ("sync_state", SYNC_COVERAGE_TABLE):
+                            if table in tables:
+                                connection.execute(
+                                    f'DELETE FROM "{table}" WHERE data_type IN ({placeholders})',
+                                    sorted(sync_types),
+                                )
                         connection.commit()
                         compacted = True
                         try:

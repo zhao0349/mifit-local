@@ -129,6 +129,40 @@ def test_sleep_date_is_waking_date(service):
     assert count(path, "sleep_sessions") == 0
 
 
+def test_partial_delete_invalidates_selected_sync_types_and_keeps_other_coverage(service):
+    key, path = database()
+    activity(path)
+    insert(path, "sleep_sessions", "sleep", sleep_id="sleep-1", start_at="2026-01-01T23:00:00",
+           end_at="2026-01-02T07:00:00", duration_minutes=480, time_asleep_minutes=450,
+           time_awake_minutes=30)
+    insert(path, "heart_rate_samples", "heart", timestamp="2026-01-02T12:00:00",
+           bpm=70, sample_type="passive")
+    insert(path, "abnormal_heart_beat_events", "abnormal", event_id="event-1",
+           start_at="2026-01-02T12:00:00", end_at="2026-01-02T12:01:00", duration_seconds=60)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            f"CREATE TABLE {manager.SYNC_COVERAGE_TABLE} "
+            "(data_type TEXT, date TEXT, PRIMARY KEY(data_type,date))"
+        )
+        connection.executemany(f"INSERT INTO {manager.SYNC_COVERAGE_TABLE} VALUES (?,?)", [
+            ("sleep", "2026-01-01"), ("sleep", "2026-01-03"),
+            ("heart_rate", "2026-01-02"), ("abnormal_heart_beat", "2026-01-02"),
+            ("daily_activity", "2026-01-01"), ("stress", "2026-01-02"),
+        ])
+        connection.commit()
+    account = service.inventory()["accounts"][0]
+    assert account["account_key"] == key and account["total_rows"] == 4
+    assert len(account["categories"]) == 7
+    preview = service.preview(key, "2026-01-02", "2026-01-02", ["sleep", "heart_rate"])
+    assert preview["total_rows"] == 3 and not preview["all_data"]
+    service.delete(preview["token"])
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute(
+            f"SELECT data_type,date FROM {manager.SYNC_COVERAGE_TABLE} ORDER BY data_type,date"
+        ).fetchall() == [("daily_activity", "2026-01-01"), ("stress", "2026-01-02")]
+    assert service.inventory()["accounts"][0]["total_rows"] == 1
+
+
 def test_workout_category_removes_whole_cross_midnight_record_and_orphan_group(service):
     key, path = database()
     activity(path)
