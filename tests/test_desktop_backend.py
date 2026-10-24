@@ -272,7 +272,7 @@ def test_empty_export_is_explicit_and_export_never_reads_vault(isolated, monkeyp
     messages = []
     result = backend.export("2026-07-01", "2026-07-01", messages.append)
     again = backend.export("2026-07-01", "2026-07-01", messages.append)
-    assert result["directory"] != again["directory"]
+    assert result["directory"] == again["directory"]
     assert result["empty"] and result["total_rows"] == 0
     assert any("没有本地记录" in message for message in messages)
 
@@ -300,7 +300,7 @@ def test_export_shanghai_offset_and_utc_boundaries_preserve_source(isolated):
             provider="mi_fitness", source_type="cloud_session", user_id="123456",
         ))
     before = db_path.read_bytes()
-    result = backend.export("2026-07-15", "2026-07-15", lambda _: None)
+    result = backend.export("2026-07-15", "2026-07-15", lambda _: None, mode="snapshot")
     payload = json.loads(
         (backend.Path(result["directory"]) / "mi_fitness.json").read_text(encoding="utf-8")
     )

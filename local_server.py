@@ -1,0 +1,303 @@
+"""Loopback dashboard control, using the pinned bridge's local backend services.
+
+The upstream MCP is stdio-only. This HTTP adapter shares its sync/status/cancel
+workflow, not its transport or credential store. No generic file/tool endpoint,
+CORS, request logging, cloud probe, or automatic synchronization is provided.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import json
+import secrets
+import socket
+import threading
+from contextlib import suppress
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import desktop_backend as backend
+from dashboard_builder import render_html
+from dashboard_data import DashboardDataError, build_summary, resolve_current_database
+from official_login import OfficialLoginError, login
+
+DEFAULT_PORT = 17865
+BUSY = "已有桌面或网页任务正在运行，请等待完成。"
+
+
+class LocalControl:
+    """One bounded process-local job shared by all browser tabs.
+
+The interface lock also covers desktop login/export actions. Cancellation is
+idempotent and completion is reported only after async resource cleanup.
+"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.job = None
+        self.worker = None
+        self.loop = self.task = None
+        self.cancel_requested = False
+        self.closed = False
+
+    def status(self):
+        account = None
+        # Reading status must never probe Xiaomi or race credential replacement.
+        if backend.interface_lock.acquire(blocking=False):
+            try:
+                account = backend.credentials_status()
+                account["scope"] = backend.account_scope()
+            finally:
+                backend.interface_lock.release()
+        with self.lock:
+            return {"service": "mifit-local", "version": 1, "account": account,
+                    "busy": backend.interface_lock.locked(), "job": copy.deepcopy(self.job)}
+
+    def emit(self, message):
+        with self.lock:
+            self.job["messages"] = (self.job["messages"] + [message])[-60:]
+
+    def start(self, kind, dates=None, *, mode="merge", expected_account=None):
+        with self.lock:
+            if self.closed or not backend.interface_lock.acquire(blocking=False):
+                raise backend.DesktopError(BUSY)
+            try:
+                if mode == "replace" and (not expected_account or expected_account != backend.account_scope()):
+                    raise backend.DesktopError("账号已变化，请刷新并重新确认覆盖操作。")
+            except Exception:
+                backend.interface_lock.release()
+                raise
+            self.cancel_requested = False
+            self.job = {"id": secrets.token_hex(16), "kind": kind,
+                        "status": "running", "messages": [], "result": None}
+            initial = copy.deepcopy(self.job)
+            self.worker = threading.Thread(
+                target=self._work, args=(kind, dates, mode, expected_account), name="MiFit-web-job", daemon=False,
+            )
+            try:
+                self.worker.start()
+            except Exception:
+                backend.interface_lock.release()
+                self.job["status"] = "error"
+                raise
+            return initial
+
+    async def _execute(self, kind, dates, mode, expected_account):
+        with self.lock:
+            self.loop = asyncio.get_running_loop()
+            self.task = asyncio.current_task()
+            cancelled = self.cancel_requested
+        if cancelled:
+            raise asyncio.CancelledError
+        if kind == "sync":
+            options = {"mode": mode, "expected_account": expected_account} if mode == "replace" else {}
+            return await backend.sync(*dates, self.emit, **options)
+        user_id, token = await login(self.emit)
+        try:
+            backend.save_credentials(user_id, token, region="cn")
+        finally:
+            user_id = token = ""
+        return {"status": "ok"}
+
+    def _work(self, kind, dates, mode, expected_account):
+        result = None
+        try:
+            result = asyncio.run(self._execute(kind, dates, mode, expected_account))
+            status = result["status"]
+        except asyncio.CancelledError:
+            status = "cancelled"
+            self.emit("已取消，已写入的缓存保留在本机。")
+        except (backend.DesktopError, OfficialLoginError) as exc:
+            status = "error"
+            self.emit(str(exc))
+        except Exception:
+            status = "error"
+            self.emit("操作未完成，请检查本机配置后重试。")
+        finally:
+            with self.lock:
+                self.loop = self.task = None
+                self.job.update(status=status, result=result)
+                backend.interface_lock.release()
+
+    def cancel(self, job_id):
+        with self.lock:
+            if not self.job or self.job["id"] != job_id:
+                raise ValueError("找不到该任务，请刷新连接状态。")
+            if self.job["status"] == "running" and not self.cancel_requested:
+                self.cancel_requested = True
+                self.job["messages"].append("正在停止，请等待资源清理完成。")
+                if self.loop and self.task:
+                    with suppress(RuntimeError):
+                        self.loop.call_soon_threadsafe(self.task.cancel)
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            job_id = self.job["id"] if self.job else None
+        if job_id:
+            self.cancel(job_id)
+        if self.worker:
+            self.worker.join()
+
+    def summary(self, dates, *, scope="all", expected_account=None):
+        if not backend.interface_lock.acquire(blocking=False):
+            raise backend.DesktopError(BUSY)
+        try:
+            if expected_account is not None and expected_account != backend.account_scope():
+                raise backend.DesktopError("账号已变化，请刷新账号状态后重新读取；当前档案未改动。")
+            options = {"start": dates[0], "end": dates[1]} if scope == "range" else {}
+            return build_summary(resolve_current_database(), **options)
+        finally:
+            backend.interface_lock.release()
+
+
+class _HTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+    def handle_error(self, request, client_address):
+        # Broken browser connections must not print data-bearing tracebacks.
+        pass
+
+
+class LocalServer:
+    def __init__(self, port=DEFAULT_PORT):
+        self.control = LocalControl()
+        self.token = secrets.token_urlsafe(32)
+        self.httpd = _HTTPServer(("127.0.0.1", port), _Handler)
+        self.httpd.owner = self
+        self.origin = f"http://127.0.0.1:{self.httpd.server_port}"
+        self.url = self.origin + "/"
+        self.thread = threading.Thread(
+            target=self.httpd.serve_forever, name="MiFit-local-http", daemon=True,
+        )
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.control.close()
+        self.thread.join()
+
+
+class _Handler(BaseHTTPRequestHandler):
+    server_version = "MiFitLocal"
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(10)
+
+    def log_message(self, *_):
+        pass
+
+    def _send(self, status, payload, content_type="application/json; charset=utf-8"):
+        # On Windows, closing with an unread POST body can reset the connection
+        # before the browser receives our error response. Drain only small,
+        # fixed-length bodies, including requests rejected before authentication.
+        if self.command == "POST" and not getattr(self, "_body_read", False):
+            self._body_read = True
+            with suppress(ValueError, OSError):
+                length = int(self.headers.get("Content-Length", "0"))
+                if 0 < length <= 2048 and not self.headers.get("Transfer-Encoding"):
+                    self.rfile.read(length)
+        body = (json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                if content_type.startswith("application/json") else payload.encode("utf-8"))
+        self.send_response(status)
+        for key, value in {
+            "Content-Type": content_type, "Content-Length": str(len(body)),
+            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
+            "Content-Security-Policy": "frame-ancestors 'none'",
+        }.items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _allowed(self, *, api=False):
+        owner = self.server.owner
+        # Reject DNS rebinding, cross-site form/image/fetch and opaque origins.
+        if (self.headers.get_all("Host") != [owner.origin.removeprefix("http://")]
+                or self.headers.get("Sec-Fetch-Site") == "cross-site" and api
+                or self.headers.get("Origin") not in (None, owner.origin)):
+            self._send(403, {"error": "仅允许本机仪表盘访问。"})
+            return False
+        if api and not secrets.compare_digest(
+            self.headers.get("X-MiFit-Token", ""), owner.token,
+        ):
+            self._send(403, {"error": "连接已失效，请重新打开本机仪表盘。"})
+            return False
+        return True
+
+    def do_GET(self):
+        if not self._allowed(api=self.path != "/"):
+            return
+        if self.path == "/":
+            # Never embed private data in the initial navigation response.
+            empty = {"schema_version": 1, "days": [], "workouts": [],
+                     "meta": {"timezone": "Asia/Shanghai", "notes": []}}
+            self._send(200, render_html(empty, local_token=self.server.owner.token),
+                       "text/html; charset=utf-8")
+        elif self.path == "/api/status":
+            self._send(200, self.server.owner.control.status())
+        else:
+            self._send(404, {"error": "接口不存在。"})
+
+    def do_POST(self):
+        if not self._allowed(api=True):
+            return
+        try:
+            if (self.headers.get("Content-Type") != "application/json"
+                    or self.headers.get("Transfer-Encoding")
+                    or len(self.headers.get_all("Content-Length", [])) != 1):
+                raise ValueError("请求格式不正确。")
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 2 <= length <= 2048:
+                raise ValueError("请求大小不正确。")
+            self._body_read = True
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                raise ValueError("请求格式不正确。")
+            control = self.server.owner.control
+            if self.path in ("/api/cache", "/api/sync"):
+                allowed = {"start", "end", "scope", "account_scope"} if self.path == "/api/cache" else {"start", "end", "mode", "account_scope"}
+                if not {"start", "end"} <= set(payload) <= allowed:
+                    raise ValueError("请选择起止日期。")
+                dates = backend.validate_dates(payload["start"], payload["end"])
+                if self.path == "/api/cache":
+                    scope = payload.get("scope", "all")
+                    if scope not in ("all", "range"):
+                        raise ValueError("读取范围无效。")
+                    self._send(200, control.summary(dates, scope=scope,
+                                                   expected_account=payload.get("account_scope")))
+                else:
+                    mode = payload.get("mode", "merge")
+                    if mode not in ("merge", "replace"):
+                        raise ValueError("同步模式无效。")
+                    self._send(202, control.start("sync", dates, mode=mode,
+                                                 expected_account=payload.get("account_scope")))
+            elif self.path == "/api/login" and not payload:
+                self._send(202, control.start("login"))
+            elif self.path == "/api/cancel" and set(payload) == {"id"}:
+                control.cancel(payload["id"])
+                self._send(200, {"status": "cancelling"})
+            else:
+                self._send(404, {"error": "接口不存在或参数不正确。"})
+        except (ValueError, UnicodeError):
+            self._send(400, {"error": "请求格式或日期不正确。"})
+        except DashboardDataError as exc:
+            self._send(409, {"error": str(exc) + " 可尝试缩小读取日期范围后重试；当前档案保留。"})
+        except backend.DesktopError as exc:
+            self._send(409, {"error": str(exc)})
+        except Exception:
+            self._send(500, {"error": "本机操作未完成，请检查配置或缩小日期范围后重试。"})
+
+    def do_OPTIONS(self):
+        self._send(403, {"error": "不允许跨站访问。"})
