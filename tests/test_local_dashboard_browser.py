@@ -270,6 +270,136 @@ def test_database_filters_preview_and_confirmation(live_page, server, monkeypatc
                          "categories": ["body_measurements"]}] * 2
 
 
+def test_single_account_repair_restores_inventory_without_replacing_manual_import(live_page, server, monkeypatch, raw_import_file):
+    page = live_page
+    page.locator("#import-file").set_input_files(str(raw_import_file))
+    expect(page.locator("#toast")).to_contain_text("导入完成")
+    original = page.evaluate("JSON.stringify(MiFitDashboard.getData())")
+    inventory = synthetic_inventory()
+    inventory["accounts"][0].update(error="上次写入未完成，需要恢复事务。", error_code="recovery_required", repairable=True)
+    monkeypatch.setattr(server.databases, "inventory", lambda: inventory)
+    page.locator("#local-database > summary").click()
+    expect(page.locator("#db-total")).to_contain_text("1 个账号数据库")
+    expect(page.locator("#db-repair")).to_be_disabled()
+    page.locator("#db-account").select_option("synthetic-account")
+    expect(page.locator("#db-account-summary")).to_contain_text("需要恢复事务")
+    expect(page.locator("#db-delete")).to_be_disabled()
+    expect(page.locator("#db-repair")).to_be_enabled()
+    requests = []
+    repairing = [False]
+    original_status = server.control.status
+
+    def status():
+        state = original_status()
+        state["busy"] = repairing[0]
+        return state
+
+    monkeypatch.setattr(server.control, "status", status)
+
+    def repair(route):
+        requests.append(route.request.post_data_json)
+        repairing[0] = True
+        inventory["accounts"][0].pop("error")
+        route.fulfill(json={"status": "ok", "recovered": True, "message": "修复完成，已通过完整性检查。",
+                            "backup_directory": "D:/synthetic/backups/account-00"})
+
+    page.route("**/api/repair", repair)
+    page.evaluate("""() => {
+      const original = window.fetch;
+      window.fetch = async (...args) => {
+        const response = await original(...args);
+        if (args[0] === '/api/repair') await new Promise(resolve => {
+          window.releaseRepair = resolve; document.documentElement.dataset.repairReady = 'true';
+        });
+        return response;
+      };
+    }""")
+    page.locator("#db-repair").click()
+    expect(page.locator("html")).to_have_attribute("data-repair-ready", "true")
+    expect(page.locator("#db-repair")).to_be_disabled()
+    expect(page.locator("#db-account")).to_be_disabled()
+    expect(page.locator("#local-status")).to_contain_text("本机任务正在运行")
+    repairing[0] = False
+    page.evaluate("releaseRepair()")
+    expect(page.locator("#db-repair-feedback")).to_contain_text("修复完成")
+    expect(page.locator("#db-repair-feedback")).to_contain_text("D:/synthetic/backups/account-00")
+    expect(page.locator("#db-account-summary")).to_contain_text("14 条记录")
+    expect(page.locator("#db-delete")).to_be_enabled()
+    assert requests == [{"account_key": "synthetic-account"}]
+    assert page.evaluate("JSON.stringify(MiFitDashboard.getData())") == original
+
+
+def test_failed_repair_shows_diagnostics_and_confirms_damaged_database_deletion(live_page, server, monkeypatch):
+    page = live_page
+    inventory = synthetic_inventory()
+    inventory["accounts"][0].update(error="数据库需要修复。", repairable=True)
+    monkeypatch.setattr(server.databases, "inventory", lambda: inventory)
+    page.locator("#local-database > summary").click()
+    expect(page.locator("#db-total")).to_contain_text("1 个账号数据库")
+    page.locator("#db-account").select_option("synthetic-account")
+    details = {"stage": "verify_candidate", "exception_type": "DatabaseError",
+               "message": "database disk image <b>malformed</b>", "sqlite_errorcode": 11,
+               "sqlite_errorname": "SQLITE_CORRUPT", "database_path": "D:/synthetic/account/mi_fitness.db",
+               "backup_directory": None, "backup_complete": False}
+    page.route("**/api/repair", lambda route: route.fulfill(status=409, json={"error": "修复失败。", "diagnostics": details}))
+    page.locator("#db-repair").click()
+    expect(page.locator("#db-repair-failure")).to_be_visible()
+    for value in ("verify_candidate", "DatabaseError", details["message"], "SQLITE_CORRUPT", details["database_path"], "—"):
+        expect(page.locator("#db-repair-diagnostics")).to_contain_text(value)
+    assert page.locator("#db-repair-diagnostics b").count() == 0
+    opened, previews, deleted = [], [], []
+
+    def open_location(route):
+        opened.append(route.request.post_data_json)
+        if len(opened) == 1:
+            route.fulfill(status=409, json={"error": "合成文件夹打开失败。"})
+        else:
+            route.fulfill(json={"status": "ok"})
+
+    def preview(route):
+        previews.append(route.request.post_data_json)
+        if len(previews) == 1:
+            route.fulfill(status=409, json={"error": "合成数据库预览失败。"})
+        else:
+            route.fulfill(json={"token": "damaged-token", "account_label": "合成账号 00",
+                                "wait_seconds": 5, "all_data": True, "total_rows": None})
+
+    def delete(route):
+        deleted.append(route.request.post_data_json)
+        inventory["accounts"] = []
+        route.fulfill(json={"status": "ok"})
+
+    page.route("**/api/open-database", open_location)
+    page.route("**/api/damaged-deletion-preview", preview)
+    page.route("**/api/delete", delete)
+    page.locator("#db-open-location").click()
+    expect(page.locator("#db-repair-failure-feedback")).to_contain_text("合成文件夹打开失败")
+    expect(page.locator("#db-repair-diagnostics")).to_contain_text("SQLITE_CORRUPT")
+    page.locator("#db-open-location").click()
+    expect(page.locator("#db-repair-failure-feedback")).to_contain_text("已打开数据库所在文件夹")
+    page.locator("#db-damaged-delete").click()
+    expect(page.locator("#db-repair-failure-feedback")).to_contain_text("合成数据库预览失败")
+    page.locator("#db-damaged-delete").click()
+    expect(page.locator("#db-repair-failure")).not_to_be_visible()
+    expect(page.locator("#local-confirm-title")).to_have_text("确认完全删除损坏的数据库")
+    expect(page.locator("#local-confirm-warning")).to_contain_text("尚未建立完整的修复备份")
+    expect(page.locator("#local-confirm-accept")).to_be_disabled()
+    expect(page.locator("#local-confirm-accept")).to_contain_text("5 秒")
+    assert page.locator("#local-confirm-accept").evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(229, 28, 42)"
+    page.locator("#local-confirm-cancel").click()
+    expect(page.locator("#db-repair-failure")).to_be_visible()
+    assert deleted == []
+    page.locator("#db-damaged-delete").click()
+    expect(page.locator("#local-confirm-accept")).to_be_disabled()
+    expect(page.locator("#local-confirm-accept")).to_be_enabled(timeout=7000)
+    page.locator("#local-confirm-accept").click()
+    expect(page.locator("#db-repair-feedback")).to_contain_text("损坏数据库已删除")
+    expect(page.locator("#db-total")).to_contain_text("0 个账号数据库")
+    assert opened == [{"account_key": "synthetic-account"}] * 2
+    assert previews == [{"account_key": "synthetic-account"}] * 3
+    assert deleted == [{"token": "damaged-token"}]
+
+
 @pytest.mark.parametrize("button", ["db-delete", "db-delete-account"])
 def test_whole_account_deletion_requires_three_second_confirmation(live_page, server, monkeypatch, button):
     page = live_page

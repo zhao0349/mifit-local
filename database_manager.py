@@ -9,13 +9,17 @@ is short-lived, single-use, and bound to the complete database and WAL contents.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import secrets
+import shutil
 import sqlite3
 import time
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import desktop_backend as backend
 from dashboard_data import build_summary
@@ -43,6 +47,40 @@ TABLES = {
 CHILD_TABLES = ("workout_detail_samples", "workout_gps_points")
 TTL_SECONDS = 300
 BUSY = "已有任务正在运行，请完成或取消后再管理数据库。"
+
+
+class DatabaseRepairError(backend.DesktopError):
+    """Structured repair diagnostics for the authenticated local web interface."""
+
+    def __init__(self, message, error, *, stage, path, backup_directory, backup_complete=False):
+        super().__init__(message)
+        self.diagnostics = {
+            "stage": stage, "exception_type": type(error).__name__, "message": str(error),
+            "sqlite_errorcode": getattr(error, "sqlite_errorcode", None),
+            "sqlite_errorname": getattr(error, "sqlite_errorname", None),
+            "database_path": str(path),
+            "backup_directory": str(backup_directory) if backup_directory.exists() else None,
+            "backup_complete": backup_complete,
+        }
+
+
+def _read_error(error) -> dict:
+    """Keep recovery-needed, busy, damaged and unsupported caches distinct."""
+    name = getattr(error, "sqlite_errorname", "")
+    code = getattr(error, "sqlite_errorcode", 0) & 255
+    if name in {"SQLITE_READONLY_ROLLBACK", "SQLITE_READONLY_RECOVERY"}:
+        return {"error_code": "recovery_required", "repairable": True,
+                "error": "上次写入被中断，数据库需要恢复未完成事务。请选择此账号并点击“一键修复”。"}
+    if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        return {"error_code": "busy", "repairable": True,
+                "error": "数据库正被其他程序占用，请等待任务结束或关闭占用程序后重试。"}
+    if code in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+        return {"error_code": "corrupt", "repairable": True,
+                "error": "数据库完整性异常。可点击“一键修复”保留原库并检查；无法安全恢复时不会覆盖原库。"}
+    if isinstance(error, backend.DesktopError):
+        return {"error_code": "unsupported", "repairable": False, "error": str(error)}
+    return {"error_code": "unreadable", "repairable": True,
+            "error": "数据库暂时无法读取，请检查文件权限，或选择此账号进行备份检查与修复。"}
 
 
 @contextmanager
@@ -292,9 +330,10 @@ class _Plan:
     categories: tuple[str, ...]
     fingerprint: tuple
     all_data: bool
-    total_rows: int
+    total_rows: int | None
     ready_at: float
     expires_at: float
+    damaged: bool = False
 
 
 class DatabaseManager:
@@ -334,11 +373,112 @@ class DatabaseManager:
                         tables = _schema(connection)
                         account.update(_identity(connection, key, tables))
                         account.update(_stats(connection, tables))
-                except (OSError, sqlite3.Error, backend.DesktopError):
-                    account["error"] = "此数据库无法安全读取，请检查文件权限、账号归属或数据库完整性。"
+                except (OSError, sqlite3.Error, backend.DesktopError) as error:
+                    account.update(_read_error(error))
                 accounts.append(account)
             return {"accounts": accounts, "total_bytes": sum(item["database_bytes"] for item in accounts),
                     "categories": [{"key": key, "label": label} for key, label in CATEGORIES]}
+
+    def repair(self, account_key):
+        """Back up the database/logs, validate recovery on a copy, then recover.
+
+        A hot rollback journal cannot be snapshotted through a read-only SQLite
+        connection. Preserve the unchanged main file and its journals first;
+        SQLite itself performs recovery. No salvage or empty replacement occurs.
+        """
+        with _locked():
+            path = _path(account_key)
+            root = backend._managed_child(path.parent, "recovery")
+            folder = root / (datetime.now(backend._LOCAL_OFFSET).strftime("%Y%m%d-%H%M%S-") + uuid4().hex[:8])
+            original, candidate = folder / "original", folder / "candidate"
+            stage = "backup"
+            backup_complete = False
+            try:
+                before = _fingerprint(path)
+                original.mkdir(parents=True)
+                candidate.mkdir()
+                for suffix in ("", "-journal", "-wal", "-shm"):
+                    source = Path(str(path) + suffix)
+                    if source.exists():
+                        saved = original / source.name
+                        shutil.copy2(source, saved)
+                        shutil.copy2(saved, candidate / source.name)
+                if _fingerprint(path) != before:
+                    raise backend.DesktopError("数据库在备份期间发生变化，未执行修复；请关闭占用程序后重试。")
+                backup_complete = True
+                recovered = any(Path(str(path) + suffix).exists() for suffix in ("-journal", "-wal"))
+
+                def check(connection):
+                    integrity = connection.execute("PRAGMA integrity_check").fetchall()
+                    if integrity != [("ok",)]:
+                        raise backend.DesktopError("PRAGMA integrity_check: " + "\n".join(str(row[0]) for row in integrity))
+                    _identity(connection, account_key, _schema(connection))
+
+                # Opening the copy for writes lets SQLite roll back only its
+                # unfinished transaction, leaving all committed records intact.
+                stage = "validate_recovered_copy"
+                with closing(_connect(candidate / path.name, write=True)) as connection:
+                    check(connection)
+                if _fingerprint(path) != before:
+                    raise backend.DesktopError("数据库在检查期间发生变化，原库未修复；请关闭占用程序后重试。")
+                stage = "recover_original"
+                with closing(_connect(path, write=True)) as connection:
+                    connection.execute("BEGIN EXCLUSIVE")
+                    connection.commit()
+                    check(connection)
+                stage = "enable_wal"
+                backend._enable_cache_wal(path)
+                self._plans.clear()
+                return {"status": "ok", "recovered": recovered, "backup_directory": str(folder),
+                        "message": "数据库恢复检查通过，已启用写入保护。已提交的数据保留，未完成的事务由 SQLite 回滚；原库和日志备份已保留。"}
+            except backend.DesktopError as error:
+                raise DatabaseRepairError("修复失败。请查看诊断详情及备份状态。", error,
+                                          stage=stage, path=path, backup_directory=folder,
+                                          backup_complete=backup_complete) from None
+            except (OSError, sqlite3.Error) as error:
+                if getattr(error, "sqlite_errorcode", 0) & 255 in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+                    reason = "数据库损坏，无法安全自动恢复；原库和日志已保留。"
+                else:
+                    reason = _read_error(error)["error"]
+                raise DatabaseRepairError(f"修复失败：{reason} 未用空库替换。", error,
+                                          stage=stage, path=path, backup_directory=folder,
+                                          backup_complete=backup_complete) from None
+
+    def open_location(self, account_key):
+        """Open only the selected managed account's database directory."""
+        with _locked():
+            path = _path(account_key)
+            os.startfile(str(path.parent))
+            return {"status": "ok", "database_path": str(path)}
+
+    def preview_damaged(self, account_key):
+        """Prepare full removal when a cache cannot pass a read-only check."""
+        with _locked():
+            path = _path(account_key)
+            damaged = False
+            try:
+                with closing(_connect(path)) as connection:
+                    damaged = connection.execute("PRAGMA integrity_check").fetchall() != [("ok",)]
+                    if not damaged:
+                        _identity(connection, account_key, _schema(connection))
+            except sqlite3.Error as error:
+                code = getattr(error, "sqlite_errorcode", 0) & 255
+                if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                    raise backend.DesktopError("数据库仍被占用，不能删除；请先关闭占用程序。") from None
+                damaged = True
+            if not damaged:
+                raise backend.DesktopError("数据库可以正常读取，请使用常规删除入口重新选择范围。")
+            now = time.monotonic()
+            self._plans = {token: plan for token, plan in self._plans.items() if plan.expires_at > now}
+            if len(self._plans) >= 64:
+                self._plans.pop(next(iter(self._plans)))
+            token = secrets.token_urlsafe(32)
+            self._plans[token] = _Plan(account_key, None, None, (), _fingerprint(path), True,
+                                      None, now + 5, now + TTL_SECONDS, damaged=True)
+            return {"token": token, "account_key": account_key,
+                    "account_label": f"无法读取的账号数据库 · {account_key[:12]}",
+                    "all_data": True, "total_rows": None, "wait_seconds": 5,
+                    "database_path": str(path), "categories": []}
 
     def preview(self, account_key, start=None, end=None, categories=None):
         """Prepare a reviewable deletion; no data is modified by this method."""
@@ -377,7 +517,7 @@ class DatabaseManager:
                 raise backend.DesktopError("数据库预览失败，未删除任何数据；请刷新列表后重试。") from None
 
     def delete(self, token):
-        """Consume one confirmed preview; a full-account deletion waits 3 seconds."""
+        """Consume a preview; full deletion waits 3 seconds, damaged caches 5."""
         if not isinstance(token, str):
             raise ValueError("删除确认无效，请重新预览。")
         with _locked():
@@ -387,12 +527,24 @@ class DatabaseManager:
                 self._plans.pop(token, None)
                 raise backend.DesktopError("删除确认已过期，请重新预览并确认。")
             if now < plan.ready_at:
-                raise backend.DesktopError("删除该账号全部数据需要等待 3 秒后再次确认。")
+                wait = 5 if plan.damaged else 3
+                raise backend.DesktopError(f"删除该账号全部数据需要等待 {wait} 秒后再次确认。")
             self._plans.pop(token)
             path = _path(plan.account_key)
             try:
                 if _fingerprint(path) != plan.fingerprint:
                     raise backend.DesktopError("数据库已变化，原删除确认失效；请重新预览。")
+                if plan.damaged:
+                    # A damaged cache cannot checkpoint through SQLite. This is
+                    # explicit whole-database deletion, never log-only recovery.
+                    # On Windows unlinking the main file fails while another
+                    # SQLite connection has it open; remove no logs before that.
+                    path.unlink()
+                    for suffix in ("-journal", "-wal", "-shm"):
+                        Path(str(path) + suffix).unlink(missing_ok=True)
+                    return {"status": "ok", "account_key": plan.account_key, "deleted_rows": None,
+                            "all_data": True, "database_removed": True, "database_bytes": 0,
+                            "compacted": True, "message": "所选损坏数据库及其日志已删除。修复备份、其他账号、导出文件和云端数据保留。"}
                 with closing(_connect(path, write=True)) as connection:
                     connection.execute("BEGIN IMMEDIATE")
                     if _fingerprint(path) != plan.fingerprint:

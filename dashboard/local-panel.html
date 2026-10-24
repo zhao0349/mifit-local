@@ -29,6 +29,9 @@
    <div class="local-section-head"><p id="db-total" class="local-muted">展开后读取本机数据库信息。</p><button class="small-button" id="db-refresh" disabled>刷新列表</button></div>
    <label class="local-account-select">选择一个账号<select id="db-account" disabled><option value="">请选择账号</option></select></label>
    <p id="db-account-summary" class="local-muted">请选择要查看或管理的账号。</p>
+   <div class="local-actions"><button class="small-button" id="db-repair" disabled>一键修复</button></div>
+   <p class="local-muted">修复前自动备份数据库与日志，检查并恢复未完成的事务，保留已提交数据。</p>
+   <p id="db-repair-feedback" class="local-feedback" role="status" hidden></p>
    <div id="db-account-details" hidden><div class="local-table-scroll"><table class="local-category-table"><thead><tr><th>数据类型</th><th>记录数</th><th>覆盖日期</th></tr></thead><tbody id="db-category-summary"></tbody></table></div>
     <fieldset id="db-filters"><legend>删除范围</legend><p class="local-muted">时间与数据类型取交集。留空表示不限；两项均不选，将删除该账号的整个数据库。</p>
      <div class="local-fields"><label>从（可留空）<input id="db-start" type="date"></label><label>至（可留空）<input id="db-end" type="date"></label></div>
@@ -40,6 +43,16 @@
    <p class="local-muted">这里只管理本机缓存数据库。已导出的文件、保存的离线网页和小米云端数据需分别管理。</p>
   </details>
   <footer class="local-console-footer"><button class="small-button" id="local-selftest" disabled>离线自检</button><button class="small-button" id="local-shutdown" disabled>关闭后端</button><span class="local-muted">关闭后，当前网页仍可独立使用。</span></footer>
+ </div>
+</dialog>
+<dialog id="db-repair-failure" class="local-console" data-local-only aria-labelledby="db-repair-failure-title">
+ <header class="local-console-head"><div><p class="local-eyebrow">本机数据 · 检查结果</p><h2 id="db-repair-failure-title">数据库修复失败</h2></div><button class="icon-button" id="db-repair-failure-close" aria-label="关闭修复失败详情"><svg class="icon"><use href="#i-close"/></svg></button></header>
+ <div class="local-console-body">
+  <p id="db-repair-failure-summary" class="local-muted"></p>
+  <section class="local-section"><h3>内部错误详情</h3><div id="db-repair-diagnostics"></div></section>
+  <p><button class="text-button" id="db-open-location">打开数据库所在位置 ↗</button></p>
+  <p id="db-repair-failure-feedback" class="local-feedback" role="status" hidden></p>
+  <section class="local-section"><h3>删除损坏的数据库</h3><p class="local-muted">仅删除这个账号的数据库与事务日志。若已创建修复备份将予以保留；已导出文件、离线网页和小米云端数据保留。没有完整备份时，删除后本机数据将无法恢复。</p><button class="small-button local-danger-outline" id="db-damaged-delete">完全删除损坏的数据库…</button></section>
  </div>
 </dialog>
 <dialog id="local-confirm" class="local-confirm" data-local-only aria-labelledby="local-confirm-title" aria-describedby="local-confirm-message">

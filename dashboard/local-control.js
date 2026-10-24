@@ -13,6 +13,7 @@
   let inventory = null, inventoryPending = false;
   let inventoryNeeded = true, manuallyImported = false, cacheRequest = 0;
   let confirmDeadline = 0, confirmTimer = null;
+  let repairFailureAccount = null;
   const accountCookie = "mifit_view_account";
   $("dashboard-account").replaceChildren(new Option("读取账号列表…", ""));
 
@@ -68,13 +69,15 @@
     $("db-refresh").disabled = blocked || inventoryPending;
     $("db-account").disabled = blocked || inventoryPending || !inventory?.accounts.length;
     const hasAccount = !!selectedAccount() && !selectedAccount().error;
+    $("db-repair").disabled = blocked || !selectedAccount() || selectedAccount().repairable === false;
+    ["db-open-location", "db-damaged-delete"].forEach(id => $(id).disabled = blocked || !repairFailureAccount);
     $("db-filters").disabled = blocked || inventoryPending || !hasAccount;
     ["db-delete", "db-delete-account"].forEach(id => $(id).disabled = blocked || inventoryPending || !hasAccount);
     if ($("local-confirm").open) updateConfirmation();
   }
   async function request(path, body) {
     const abort = new AbortController();
-    const timeout = setTimeout(() => abort.abort(), ["/api/cache", "/api/accounts", "/api/deletion-preview", "/api/delete"].includes(path) ? 120000 : 10000);
+    const timeout = setTimeout(() => abort.abort(), ["/api/cache", "/api/accounts", "/api/deletion-preview", "/api/damaged-deletion-preview", "/api/delete", "/api/repair"].includes(path) ? 120000 : 10000);
     try {
       const response = await fetch(path, {
         method:body === undefined ? "GET" : "POST", cache:"no-store", credentials:"omit",
@@ -85,6 +88,7 @@
       if (!response.ok) {
         const error = new Error(value.error || "本机请求未完成。");
         error.status = response.status;
+        error.diagnostics = value.diagnostics;
         throw error;
       }
       return value;
@@ -339,8 +343,88 @@
   }
   $("local-database").addEventListener("toggle", () => { if ($("local-database").open) refreshInventory(); });
   $("db-refresh").addEventListener("click", refreshInventory);
-  $("db-account").addEventListener("change", () => { clearFilters(); renderAccount(); });
+  $("db-account").addEventListener("change", () => { clearFilters(); $("db-repair-feedback").hidden = true; renderAccount(); });
   $("db-clear-filters").addEventListener("click", clearFilters);
+  function showRepairFailure(item, error) {
+    repairFailureAccount = {account_key:item.account_key, label:item.label, backupComplete:error.diagnostics?.backup_complete === true};
+    $("db-repair-failure-summary").textContent = `账号：${item.label} · ${error.message}`;
+    const diagnostics = error.diagnostics || {message:error.message};
+    $("db-repair-diagnostics").replaceChildren();
+    for (const key of ["stage", "exception_type", "message", "sqlite_errorcode", "sqlite_errorname", "database_path", "backup_directory", "backup_complete"]) {
+      const row = document.createElement("p"), label = document.createElement("strong"), value = document.createElement("span");
+      row.style.overflowWrap = "anywhere";
+      label.textContent = key;
+      value.textContent = diagnostics[key] == null ? "—" : String(diagnostics[key]);
+      value.style.whiteSpace = "pre-wrap";
+      row.append(label, document.createElement("br"), value);
+      $("db-repair-diagnostics").append(row);
+    }
+    $("db-repair-failure-feedback").hidden = true;
+    if (!$("db-repair-failure").open) $("db-repair-failure").showModal();
+    controls();
+  }
+  function failureFeedback(message) {
+    $("db-repair-failure-feedback").textContent = message;
+    $("db-repair-failure-feedback").hidden = false;
+  }
+  function failureAction(action) {
+    if (!connected || busy || pending || !repairFailureAccount) return;
+    return act(async () => {
+      try { return await action(); }
+      catch (error) { failureFeedback(error.message); throw error; }
+    });
+  }
+  $("db-repair-failure-close").addEventListener("click", () => $("db-repair-failure").close());
+  $("db-open-location").addEventListener("click", () => failureAction(async () => {
+    await request("/api/open-database", {account_key:repairFailureAccount.account_key});
+    failureFeedback("已打开数据库所在文件夹。");
+  }));
+  $("db-damaged-delete").addEventListener("click", async () => {
+    const item = repairFailureAccount;
+    if (!item) return;
+    const preview = await failureAction(() => request("/api/damaged-deletion-preview", {account_key:item.account_key}));
+    if (!preview) return;
+    $("db-repair-failure").close();
+    const accepted = await confirmAction({
+      title:"确认完全删除损坏的数据库", label:"完全删除数据库",
+      message:`账号：${preview.account_label}${preview.database_path ? "\n数据库：" + preview.database_path : ""}\n无法完整读取此数据库，因此不能准确统计记录数。\n将删除该账号的数据库文件及其事务日志。`,
+      seconds:Math.max(5, preview.wait_seconds || 0),
+      warning:(item.backupComplete ? "此操作无法撤销。" : "尚未建立完整的修复备份，删除后本机数据将无法恢复。") + "若已创建修复备份将予以保留；已导出文件、离线网页和小米云端数据保留。",
+    });
+    if (!accepted) { $("db-repair-failure").showModal(); controls(); return; }
+    await act(async () => {
+      try { await request("/api/delete", {token:preview.token}); }
+      catch (error) { $("db-repair-failure").showModal(); failureFeedback(error.message); throw error; }
+      repairFailureAccount = null;
+      const message = "所选账号的损坏数据库已删除；已创建的修复备份、导出文件与当前网页副本保留。";
+      $("db-repair-feedback").textContent = message;
+      $("db-repair-feedback").hidden = false;
+      if (loadedCacheAccount === item.account_key) $("local-source").textContent = "当前展示的是删除前载入的缓存副本。";
+      notify(message);
+      busy = false;
+      await refreshInventory();
+    });
+  });
+  $("db-repair").addEventListener("click", () => {
+    const item = selectedAccount();
+    if (!item) return;
+    act(async () => {
+      const feedback = $("db-repair-feedback");
+      feedback.hidden = false;
+      feedback.textContent = "正在检查并修复所选账号数据库，请稍候…";
+      try {
+        const result = await request("/api/repair", {account_key:item.account_key});
+        feedback.textContent = result.message + (result.backup_directory ? " 备份位置：" + result.backup_directory : "");
+        // A status poll may have seen the repair lock; the response means it is released.
+        busy = false;
+        await refreshInventory();
+      } catch (error) {
+        feedback.textContent = error.message || "修复未完成，请稍后重试。";
+        showRepairFailure(item, error);
+        throw error;
+      }
+    });
+  });
   async function deleteSelection(entireAccount) {
     const item = selectedAccount();
     if (!item) { notify("请先选择一个账号。"); return; }

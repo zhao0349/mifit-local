@@ -12,6 +12,7 @@ import pytest
 
 import dashboard_data
 import local_server
+from database_manager import DatabaseRepairError
 
 
 @pytest.fixture
@@ -355,3 +356,31 @@ def test_cache_can_read_selected_account_without_changing_sync_account(server):
     assert local_server.backend.account_scope() == "synthetic-account"
     assert request(server, "/api/cache", {**payload, "scope": "range"})[0] == 200
     server.databases.summary.assert_called_with("selected", start="2026-01-01", end="2026-01-02")
+
+
+def test_repair_route_requires_one_account_and_returns_local_backup(server, tmp_path):
+    server.databases = Mock()
+    server.databases.repair.return_value = {"status": "ok", "backup_directory": "synthetic-backup"}
+    assert request(server, "/api/repair", {})[0] == 400
+    assert request(server, "/api/repair", {"account_key": "selected", "all": True})[0] == 400
+    status, result, _ = request(server, "/api/repair", {"account_key": "selected"})
+    assert status == 200 and result["backup_directory"] == "synthetic-backup"
+    server.databases.repair.assert_called_once_with("selected")
+    cause = sqlite3.OperationalError("attempt to write a readonly database")
+    cause.sqlite_errorcode = sqlite3.SQLITE_READONLY_ROLLBACK
+    cause.sqlite_errorname = "SQLITE_READONLY_ROLLBACK"
+    server.databases.repair.side_effect = DatabaseRepairError(
+        "修复失败", cause, stage="recover_original", path=tmp_path / "mi_fitness.db",
+        backup_directory=tmp_path, backup_complete=True,
+    )
+    status, result, _ = request(server, "/api/repair", {"account_key": "selected"})
+    assert status == 409 and result["diagnostics"]["sqlite_errorname"] == "SQLITE_READONLY_ROLLBACK"
+    assert result["diagnostics"]["message"] == str(cause)
+    for endpoint, method, response in (
+        ("open-database", "open_location", {"status": "ok"}),
+        ("damaged-deletion-preview", "preview_damaged", {"token": "damaged", "wait_seconds": 5}),
+    ):
+        getattr(server.databases, method).return_value = response
+        assert request(server, "/api/" + endpoint, {})[0] == 400
+        assert request(server, "/api/" + endpoint, {"account_key": "selected"})[1] == response
+        getattr(server.databases, method).assert_called_once_with("selected")

@@ -491,6 +491,15 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, self.server.owner.database_action("preview", **payload))
             elif self.path == "/api/delete" and set(payload) == {"token"}:
                 self._send(200, self.server.owner.database_action("delete", payload["token"]))
+            elif self.path == "/api/repair":
+                if set(payload) != {"account_key"}:
+                    raise ValueError("请明确选择一个需要修复的账号。")
+                self._send(200, self.server.owner.database_action("repair", payload["account_key"]))
+            elif self.path in ("/api/open-database", "/api/damaged-deletion-preview"):
+                if set(payload) != {"account_key"}:
+                    raise ValueError("请明确选择一个账号。")
+                method = "open_location" if self.path == "/api/open-database" else "preview_damaged"
+                self._send(200, self.server.owner.database_action(method, payload["account_key"]))
             elif self.path == "/api/cancel" and set(payload) == {"id"}:
                 control.cancel(payload["id"])
                 self._send(200, {"status": "cancelling"})
@@ -501,7 +510,8 @@ class _Handler(BaseHTTPRequestHandler):
         except DashboardDataError as exc:
             self._send(409, {"error": str(exc) + " 可尝试缩小读取日期范围后重试；当前档案保留。"})
         except backend.DesktopError as exc:
-            self._send(409, {"error": str(exc)})
+            details = {"diagnostics": exc.diagnostics} if hasattr(exc, "diagnostics") else {}
+            self._send(409, {"error": str(exc), **details})
         except Exception:
             self._send(500, {"error": "本机操作未完成，请检查配置或缩小日期范围后重试。"})
 

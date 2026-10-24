@@ -315,6 +315,17 @@ def _replace_database(source_path: Path, target_path: Path) -> None:
         source.backup(target)
 
 
+def _enable_cache_wal(path: Path) -> None:
+    """Keep committed cache pages readable after an interrupted writer.
+
+    WAL mode persists for later upstream connections, whose SQLite default is
+    synchronous=FULL. SQLite owns recovery/checkpointing; never remove its logs.
+    """
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=rw", uri=True)) as connection:
+        if connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
+            raise DesktopError("无法启用数据库写入保护，请关闭其他占用数据库的程序后重试。")
+
+
 async def sync(start: str, end: str, emit: Emit, *, mode="merge", expected_account=None) -> dict:
     """Skip completed days by default; upsert missing or still-open dates.
 
@@ -337,7 +348,8 @@ async def sync(start: str, end: str, emit: Emit, *, mode="merge", expected_accou
             target.parent.mkdir(parents=True, exist_ok=True)
             staging = _inside(target.parent / f".replace-{uuid4().hex}.db")
             emit("覆盖模式：先获取所选日期，全部成功后才替换当前账号历史。")
-        result = await _sync_account(start, end, emit, credentials, staging or target)
+        result = await _sync_account(start, end, emit, credentials, staging or target,
+                                     protect_writes=staging is None)
         result["mode"] = mode
         result["committed"] = mode == "merge"
         if staging:
@@ -384,7 +396,7 @@ def _workout_details_pending(db_path, user_id, start, end):
     return any(sid and report and not (samples or gps) for sid, report, samples, gps in rows), len(rows)
 
 
-async def _sync_account(start, end, emit, credentials, db_path) -> dict:
+async def _sync_account(start, end, emit, credentials, db_path, *, protect_writes=True) -> dict:
     """Fetch into one account database; caller owns the operation lock."""
     adapter = None
     try:
@@ -424,6 +436,10 @@ async def _sync_account(start, end, emit, credentials, db_path) -> dict:
                         emit("连接失败或账号不匹配，请检查凭据、地区及网络后重试。")
                         return _summarize(types)
                     database = _AccountDatabase(Database(db_path), user_id)
+                    # Replacement writes only a disposable staging database;
+                    # keep it self-contained until the atomic backup publishes it.
+                    if protect_writes:
+                        _enable_cache_wal(db_path)
                     service = SyncService(adapter, database, chunk_days=7)
                 emit(f"正在同步{label}：第 {number}/{len(ranges)} 块。")
                 try:
