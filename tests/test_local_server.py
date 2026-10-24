@@ -1,7 +1,6 @@
 """Synthetic loopback integration; never read real accounts or contact Xiaomi."""
 
 import asyncio
-import gc
 import http.client
 import json
 import sqlite3
@@ -17,15 +16,12 @@ import local_server
 
 @pytest.fixture
 def server(monkeypatch):
-    # Prior Tk tests must be collected on the main thread, before an HTTP worker
-    # can trigger cyclic GC and block in a Tk variable finalizer.
-    gc.collect()
     monkeypatch.setattr(local_server.backend, "interface_lock", threading.Lock())
     monkeypatch.setattr(local_server.backend, "account_scope", lambda: "synthetic-account")
     monkeypatch.setattr(local_server.backend, "credentials_status", lambda: {
         "configured": True, "keyring_available": True, "account_masked": "******00",
     })
-    for name in ("sync", "save_credentials"):
+    for name in ("sync", "save_credentials", "export", "smoke_demo"):
         monkeypatch.setattr(local_server.backend, name,
                             Mock(side_effect=AssertionError("real backend forbidden")))
     monkeypatch.setattr(local_server, "login", Mock(side_effect=AssertionError("real login forbidden")))
@@ -242,3 +238,98 @@ def test_cache_defaults_to_whole_history_and_rejects_stale_account(server, monke
     assert called == [("synthetic.db", {})]
     assert request(server, "/api/cache", {**dates, "account_scope": "old-account"})[0] == 409
     assert len(called) == 1
+
+
+def test_manual_credentials_are_saved_without_echo(server, monkeypatch):
+    saved = Mock(return_value={"configured": True, "account_masked": "******00"})
+    monkeypatch.setattr(local_server.backend, "save_credentials", saved)
+    payload = {"user_id": "12345600", "pass_token": "SYNTHETIC_TOKEN" * 300}
+    code, body, _ = request(server, "/api/credentials", payload)
+    assert code == 200 and body["configured"]
+    saved.assert_called_once_with(payload["user_id"], payload["pass_token"], region="cn")
+    assert "SYNTHETIC_TOKEN" not in json.dumps(body)
+    assert "12345600" not in json.dumps(request(server, "/api/status")[1])
+
+
+def test_export_and_snapshot_jobs_and_selftest(server, monkeypatch):
+    exported = Mock(return_value={"directory": "synthetic", "empty": False})
+    monkeypatch.setattr(local_server.backend, "export", exported)
+    for mode in ("cumulative", "snapshot"):
+        code, job, _ = request(server, "/api/export", {
+            "start": "2026-01-01", "end": "2026-01-02", "mode": mode,
+            "account_scope": "synthetic-account",
+        })
+        assert code == 202 and not job["cancellable"]
+        assert wait_job(server)["status"] == "ok"
+        assert exported.call_args.kwargs == {"mode": mode}
+    monkeypatch.setattr(local_server.backend, "smoke_demo", lambda: {"directory": "synthetic-demo"})
+    assert request(server, "/api/selftest", {})[0] == 202
+    assert wait_job(server)["status"] == "ok"
+
+
+def test_sync_export_waits_for_publication_and_cancelled_sync_does_not_export(server, monkeypatch):
+    writing, release = threading.Event(), threading.Event()
+
+    async def sync(*args):
+        return {"status": "ok", "all_ok": True}
+
+    def export(*args):
+        writing.set()
+        release.wait(3)
+        return {"directory": "synthetic"}
+
+    monkeypatch.setattr(local_server.backend, "sync", sync)
+    monkeypatch.setattr(local_server.backend, "export", export)
+    payload = {"start": "2026-01-01", "end": "2026-01-02", "export": True}
+    job = request(server, "/api/sync", payload)[1]
+    try:
+        assert writing.wait(2)
+        assert not request(server, "/api/status")[1]["job"]["cancellable"]
+        request(server, "/api/cancel", {"id": job["id"]})
+    finally:
+        release.set()
+    assert wait_job(server)["status"] == "ok"
+
+    async def blocked(*args):
+        await asyncio.sleep(60)
+
+    exported = Mock()
+    monkeypatch.setattr(local_server.backend, "sync", blocked)
+    monkeypatch.setattr(local_server.backend, "export", exported)
+    job = request(server, "/api/sync", payload)[1]
+    request(server, "/api/cancel", {"id": job["id"]})
+    assert wait_job(server)["status"] == "cancelled"
+    exported.assert_not_called()
+
+
+def test_database_routes_require_one_account_and_confirmed_token(server):
+    server.databases = Mock()
+    server.databases.inventory.return_value = {"accounts": [], "categories": []}
+    server.databases.preview.return_value = {"token": "confirmation", "all_data": True, "wait_seconds": 3}
+    server.databases.delete.return_value = {"status": "ok"}
+    assert request(server, "/api/accounts")[0] == 200
+    assert request(server, "/api/deletion-preview", {})[0] == 400
+    assert request(server, "/api/deletion-preview", {"accounts": ["one", "two"]})[0] == 400
+    assert request(server, "/api/deletion-preview", {"account_key": "one", "categories": []})[0] == 200
+    server.databases.preview.assert_called_once_with(account_key="one", categories=[])
+    assert request(server, "/api/delete", {"account_key": "one"})[0] == 404
+    server.databases.delete.assert_not_called()
+    assert request(server, "/api/delete", {"token": "confirmation"})[0] == 200
+    server.databases.delete.assert_called_once_with("confirmation")
+
+
+def test_shutdown_stops_server_and_cancels_sync(server, monkeypatch):
+    cleaned = threading.Event()
+
+    async def sync(*args):
+        try:
+            await asyncio.sleep(60)
+        finally:
+            cleaned.set()
+
+    monkeypatch.setattr(local_server.backend, "sync", sync)
+    request(server, "/api/sync", {"start": "2026-01-01", "end": "2026-01-02"})
+    assert request(server, "/api/shutdown", {})[1] == {"status": "closed"}
+    assert server.closed.wait(3)
+    assert cleaned.is_set()
+    assert not server.thread.is_alive()

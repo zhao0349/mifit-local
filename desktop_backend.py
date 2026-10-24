@@ -1,4 +1,4 @@
-"""Local desktop orchestration for the separately installed Mi Fitness bridge.
+"""Local service orchestration for the separately installed Mi Fitness bridge.
 
 Importing this module does not read credentials, create files, or access the network.
 Only ``sync`` accesses Xiaomi; tests and ``smoke_demo`` use synthetic records.
@@ -41,7 +41,7 @@ DATA_TYPES = {
     "workout_detail": "运动明细及轨迹",
 }
 _operation_lock = threading.Lock()
-# Serializes whole user actions across the desktop and its local web interface,
+# Serializes whole user actions across browser tabs of the local web interface,
 # including login and cache reads. Backend sync/export retain their own lock.
 interface_lock = threading.Lock()
 Emit = Callable[[str], None]

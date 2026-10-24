@@ -1,19 +1,46 @@
-<section class="import-state" id="local-panel" data-local-only aria-label="本地后端控制">
- <h2 style="font-size:16px;margin-top:0">本地后端</h2>
- <p id="local-status" role="status">正在连接本机服务…</p>
- <p id="local-account">正在读取账号配置…</p>
- <p id="local-source">当前档案：尚未读取本地缓存。</p>
- <div style="display:flex;flex-wrap:wrap;justify-content:flex-start;align-items:center;gap:10px;margin:12px 0">
-  <label>开始 <input id="local-start" type="date" required style="max-width:150px"></label>
-  <label>结束 <input id="local-end" type="date" required style="max-width:150px"></label>
-  <label>读取 <select id="local-read-scope"><option value="all">全部历史（默认）</option><option value="range">仅所选日期</option></select></label>
-  <button class="small-button" id="local-load" disabled>读取本地缓存</button>
-  <button class="small-button" id="local-sync" disabled>从小米同步</button>
-  <button class="small-button" id="local-login" disabled>小米官网登录</button>
-  <button class="small-button" id="local-cancel" disabled>取消任务</button>
-  <button class="small-button" id="local-reconnect">重新连接</button>
+<dialog id="local-panel" class="local-console" data-local-only aria-labelledby="local-title">
+ <header class="local-console-head"><div><p class="local-eyebrow">本机服务</p><h2 id="local-title">后端控制台</h2></div><button class="icon-button" id="local-close" aria-label="关闭后端窗口"><svg class="icon"><use href="#i-close"/></svg></button></header>
+ <div class="local-console-body">
+  <p id="local-status" role="status">正在连接本机服务…</p>
+  <p id="local-source" class="local-muted">当前档案：尚未读取本地缓存。</p>
+  <p id="local-feedback" class="local-feedback" role="status" hidden></p>
+  <section class="local-section" aria-labelledby="local-account-title">
+   <div class="local-section-head"><h3 id="local-account-title">账号连接</h3><a class="text-button" href="/help" target="_blank" rel="noopener noreferrer">登录帮助 ↗</a></div>
+   <p id="local-account">正在读取账号配置…</p>
+   <div class="local-actions"><button class="small-button local-primary" id="local-login" disabled>小米官网登录</button><button class="small-button" id="local-reconnect">重新连接</button></div>
+   <p class="local-muted">在独立 Edge 窗口完成官方验证或扫码。凭据仅保存到这台电脑的 Windows 凭据管理器。</p>
+   <details id="local-manual"><summary>手动配置凭据（备用）</summary><form id="local-credentials" autocomplete="off">
+    <div class="local-fields"><label>userId<input id="local-user-id" type="text" inputmode="numeric" autocomplete="off" maxlength="20" spellcheck="false"></label><label>passToken<input id="local-pass-token" type="password" autocomplete="new-password" maxlength="8192" spellcheck="false"></label></div>
+    <button class="small-button" id="local-save-credentials" type="submit" disabled>保存到本机</button>
+   </form></details>
+  </section>
+  <section class="local-section" aria-labelledby="local-data-title">
+   <div class="local-section-head"><h3 id="local-data-title">同步与导出</h3><span class="local-muted">北京时间 · 包含起止日</span></div>
+   <div class="local-fields local-date-fields"><label>开始日期<input id="local-start" type="date" required></label><label>结束日期<input id="local-end" type="date" required></label><div class="local-shortcuts"><button class="small-button" id="local-last-month">近 30 天</button><button class="small-button" id="local-last-year">近一年</button></div></div>
+   <label class="local-check"><input id="local-replace" type="checkbox">覆盖当前账号历史，仅保留所选日期（需再次确认）</label>
+   <div class="local-actions"><button class="small-button local-primary" id="local-sync-export" disabled>同步并导出</button><button class="small-button" id="local-sync" disabled>从小米同步</button><button class="small-button" id="local-export" disabled>仅导出所有缓存</button><button class="small-button" id="local-snapshot" disabled>另存所选日期快照</button><button class="small-button" id="local-open-exports" disabled>打开导出文件夹</button></div>
+   <p class="local-muted">默认追加更新，重复记录更新、其他历史保留。累计 JSON / CSV 包含当前账号的全部缓存；日期用于同步及另存快照。</p>
+   <div class="local-load-row"><label>读取范围<select id="local-read-scope"><option value="all">全部历史（默认）</option><option value="range">仅所选日期</option></select></label><button class="small-button" id="local-load" disabled>读取本地缓存</button></div>
+   <p class="local-muted">点击“读取本地缓存”才会更新图表。同步和导出不会替换当前手动导入的档案。</p>
+  </section>
+  <section class="local-section local-job" aria-labelledby="local-progress-title"><div class="local-section-head"><h3 id="local-progress-title">任务进度</h3><button class="small-button" id="local-cancel" disabled>取消任务</button></div><pre id="local-progress" aria-label="任务进度">尚未开始任务。</pre></section>
+  <details id="local-database" class="local-section local-database"><summary>数据库管理<span>账号、日期范围与磁盘占用</span></summary>
+   <div class="local-section-head"><p id="db-total" class="local-muted">展开后读取本机数据库信息。</p><button class="small-button" id="db-refresh" disabled>刷新列表</button></div>
+   <label class="local-account-select">选择一个账号<select id="db-account" disabled><option value="">请选择账号</option></select></label>
+   <p id="db-account-summary" class="local-muted">请选择要查看或管理的账号。</p>
+   <div id="db-account-details" hidden><div class="local-table-scroll"><table class="local-category-table"><thead><tr><th>数据类型</th><th>记录数</th><th>覆盖日期</th></tr></thead><tbody id="db-category-summary"></tbody></table></div>
+    <fieldset id="db-filters"><legend>删除范围</legend><p class="local-muted">时间与数据类型取交集。留空表示不限；两项均不选，将删除该账号的整个数据库。</p>
+     <div class="local-fields"><label>从（可留空）<input id="db-start" type="date"></label><label>至（可留空）<input id="db-end" type="date"></label></div>
+     <div id="db-categories" class="local-category-checks"></div><button class="text-button" id="db-clear-filters">清除筛选条件</button>
+     <p class="local-muted">每一类按整条记录删除：体重包括体脂等全部身体测量字段；心率包括异常心搏；运动包括明细与轨迹。睡眠按醒来日期，运动按开始日期。</p>
+    </fieldset>
+    <div class="local-actions"><button class="small-button local-danger-outline" id="db-delete" disabled>删除所选范围…</button><button class="small-button local-danger-outline" id="db-delete-account" disabled>删除此账号数据库…</button></div>
+   </div>
+   <p class="local-muted">这里只管理本机缓存数据库。已导出的文件、保存的离线网页和小米云端数据需分别管理。</p>
+  </details>
+  <footer class="local-console-footer"><button class="small-button" id="local-selftest" disabled>离线自检</button><button class="small-button" id="local-shutdown" disabled>关闭后端</button><span class="local-muted">关闭后，当前网页仍可独立使用。</span></footer>
  </div>
- <label><input id="local-replace" type="checkbox"> 覆盖当前账号历史（仅保留所选日期，需确认）</label>
- <p>默认追加更新：重复记录更新，其他历史保留。日期用于同步或限定读取；同步后点击“读取本地缓存”更新图表。手动导入仍可独立使用。</p>
- <pre id="local-progress" aria-label="任务进度" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto;font:inherit"></pre>
-</section>
+</dialog>
+<dialog id="local-confirm" class="local-confirm" data-local-only aria-labelledby="local-confirm-title" aria-describedby="local-confirm-message">
+ <h2 id="local-confirm-title">确认删除数据</h2><p id="local-confirm-message"></p><p id="local-confirm-warning">此操作无法撤销，请核对账号与范围。</p><p id="local-confirm-error" role="alert" hidden></p><div class="local-confirm-actions"><button class="small-button" id="local-confirm-cancel" autofocus>取消</button><button class="small-button local-danger" id="local-confirm-accept">确认删除</button></div>
+</dialog>

@@ -9,20 +9,29 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
+import os
 import secrets
 import socket
 import threading
 from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import desktop_backend as backend
+from database_manager import DatabaseManager
 from dashboard_builder import render_html
 from dashboard_data import DashboardDataError, build_summary, resolve_current_database
 from official_login import OfficialLoginError, login
 
 DEFAULT_PORT = 17865
-BUSY = "已有桌面或网页任务正在运行，请等待完成。"
+BUSY = "已有任务正在运行，请等待完成。"
+
+
+def installation_id():
+    """Non-secret identity used only to reopen this installation's own service."""
+    return hashlib.sha256(str(backend.ROOT.resolve()).encode()).hexdigest()
 
 
 class LocalControl:
@@ -39,6 +48,8 @@ idempotent and completion is reported only after async resource cleanup.
         self.loop = self.task = None
         self.cancel_requested = False
         self.closed = False
+        self.last_export = None
+        self.export_account = None
 
     def status(self):
         account = None
@@ -51,25 +62,30 @@ idempotent and completion is reported only after async resource cleanup.
                 backend.interface_lock.release()
         with self.lock:
             return {"service": "mifit-local", "version": 1, "account": account,
-                    "busy": backend.interface_lock.locked(), "job": copy.deepcopy(self.job)}
+                    "busy": backend.interface_lock.locked(), "closed": self.closed,
+                    "job": copy.deepcopy(self.job)}
 
     def emit(self, message):
         with self.lock:
             self.job["messages"] = (self.job["messages"] + [message])[-60:]
 
     def start(self, kind, dates=None, *, mode="merge", expected_account=None):
+        if kind not in {"sync", "sync_export", "export", "selftest", "login"}:
+            raise ValueError("任务类型无效。")
         with self.lock:
             if self.closed or not backend.interface_lock.acquire(blocking=False):
                 raise backend.DesktopError(BUSY)
             try:
-                if mode == "replace" and (not expected_account or expected_account != backend.account_scope()):
+                if ((mode == "replace" and not expected_account)
+                        or (expected_account is not None and expected_account != backend.account_scope())):
                     raise backend.DesktopError("账号已变化，请刷新并重新确认覆盖操作。")
             except Exception:
                 backend.interface_lock.release()
                 raise
             self.cancel_requested = False
             self.job = {"id": secrets.token_hex(16), "kind": kind,
-                        "status": "running", "messages": [], "result": None}
+                        "status": "running", "messages": [], "result": None,
+                        "cancellable": kind in {"sync", "sync_export", "login"}}
             initial = copy.deepcopy(self.job)
             self.worker = threading.Thread(
                 target=self._work, args=(kind, dates, mode, expected_account), name="MiFit-web-job", daemon=False,
@@ -89,15 +105,65 @@ idempotent and completion is reported only after async resource cleanup.
             cancelled = self.cancel_requested
         if cancelled:
             raise asyncio.CancelledError
-        if kind == "sync":
+        if kind in {"sync", "sync_export"}:
             options = {"mode": mode, "expected_account": expected_account} if mode == "replace" else {}
-            return await backend.sync(*dates, self.emit, **options)
+            result = await backend.sync(*dates, self.emit, **options)
+            if kind == "sync":
+                return result
+            # Crossing into file publication is atomic with respect to Cancel.
+            # Once publication starts, shutdown waits for it to finish.
+            with self.lock:
+                if self.cancel_requested:
+                    raise asyncio.CancelledError
+                self.job["cancellable"] = False
+            exported = backend.export(*dates, self.emit)
+            self._remember_export(exported)
+            return {**result, "export": exported}
+        if kind == "export":
+            result = backend.export(*dates, self.emit, mode=mode)
+            self._remember_export(result)
+            return {**result, "status": "ok"}
+        if kind == "selftest":
+            result = backend.smoke_demo()
+            self.emit("离线自检通过：已用虚构数据验证 SQLite、CSV 和 JSON；未连接小米。")
+            return {**result, "status": "ok"}
         user_id, token = await login(self.emit)
         try:
             backend.save_credentials(user_id, token, region="cn")
         finally:
             user_id = token = ""
         return {"status": "ok"}
+
+    def _remember_export(self, result):
+        self.last_export = result.get("directory")
+        self.export_account = backend.account_scope()
+
+    def idle_action(self, action):
+        """Serialize short credential/file actions with jobs and database edits."""
+        with self.lock:
+            if self.closed or not backend.interface_lock.acquire(blocking=False):
+                raise backend.DesktopError(BUSY)
+        try:
+            return action()
+        finally:
+            backend.interface_lock.release()
+
+    def open_exports(self):
+        def action():
+            scope = backend.account_scope()
+            if not scope:
+                raise backend.DesktopError("尚未配置账号，请先登录。")
+            base = backend._account_directory(backend.EXPORTS_DIR, scope)
+            current = backend._managed_child(base, "current")
+            target = current if current.is_dir() else base
+            if self.export_account == scope and self.last_export:
+                candidate = backend._inside(Path(self.last_export))
+                if candidate.is_relative_to(base) and candidate.is_dir():
+                    target = candidate
+            target.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(target))
+            return {"status": "ok"}
+        return self.idle_action(action)
 
     def _work(self, kind, dates, mode, expected_account):
         result = None
@@ -123,7 +189,8 @@ idempotent and completion is reported only after async resource cleanup.
         with self.lock:
             if not self.job or self.job["id"] != job_id:
                 raise ValueError("找不到该任务，请刷新连接状态。")
-            if self.job["status"] == "running" and not self.cancel_requested:
+            if (self.job["status"] == "running" and self.job["cancellable"]
+                    and not self.cancel_requested):
                 self.cancel_requested = True
                 self.job["messages"].append("正在停止，请等待资源清理完成。")
                 if self.loop and self.task:
@@ -168,6 +235,9 @@ class _HTTPServer(ThreadingHTTPServer):
 class LocalServer:
     def __init__(self, port=DEFAULT_PORT):
         self.control = LocalControl()
+        self.databases = DatabaseManager()
+        self.closed = threading.Event()
+        self._close_lock = threading.Lock()
         self.token = secrets.token_urlsafe(32)
         self.httpd = _HTTPServer(("127.0.0.1", port), _Handler)
         self.httpd.owner = self
@@ -182,10 +252,23 @@ class LocalServer:
         return self
 
     def close(self):
-        self.httpd.shutdown()
-        self.httpd.server_close()
-        self.control.close()
-        self.thread.join()
+        with self._close_lock:
+            if self.closed.is_set():
+                return
+            try:
+                self.control.close()
+                # Drain an in-flight cache read, credential save or deletion.
+                with backend.interface_lock:
+                    self.httpd.shutdown()
+                    self.httpd.server_close()
+                    self.thread.join()
+            finally:
+                self.closed.set()
+
+    def request_shutdown(self):
+        with self.control.lock:
+            self.control.closed = True
+        threading.Thread(target=self.close, name="MiFit-shutdown", daemon=False).start()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -206,7 +289,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._body_read = True
             with suppress(ValueError, OSError):
                 length = int(self.headers.get("Content-Length", "0"))
-                if 0 < length <= 2048 and not self.headers.get("Transfer-Encoding"):
+                if 0 < length <= 12288 and not self.headers.get("Transfer-Encoding"):
                     self.rfile.read(length)
         body = (json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
                 if content_type.startswith("application/json") else payload.encode("utf-8"))
@@ -237,7 +320,7 @@ class _Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
-        if not self._allowed(api=self.path != "/"):
+        if not self._allowed(api=self.path not in {"/", "/health", "/help"}):
             return
         if self.path == "/":
             # Never embed private data in the initial navigation response.
@@ -247,6 +330,19 @@ class _Handler(BaseHTTPRequestHandler):
                        "text/html; charset=utf-8")
         elif self.path == "/api/status":
             self._send(200, self.server.owner.control.status())
+        elif self.path == "/health":
+            self._send(200, {"service": "mifit-local", "version": 2,
+                             "installation": installation_id()})
+        elif self.path == "/help":
+            self._send(200, (backend.ROOT / "使用说明.html").read_text(encoding="utf-8"),
+                       "text/html; charset=utf-8")
+        elif self.path == "/api/accounts":
+            try:
+                self._send(200, self.server.owner.databases.inventory())
+            except backend.DesktopError as exc:
+                self._send(409, {"error": str(exc)})
+            except Exception:
+                self._send(500, {"error": "无法读取本机数据库列表。"})
         else:
             self._send(404, {"error": "接口不存在。"})
 
@@ -259,15 +355,19 @@ class _Handler(BaseHTTPRequestHandler):
                     or len(self.headers.get_all("Content-Length", [])) != 1):
                 raise ValueError("请求格式不正确。")
             length = int(self.headers.get("Content-Length", "0"))
-            if not 2 <= length <= 2048:
+            if not 2 <= length <= (12288 if self.path == "/api/credentials" else 2048):
                 raise ValueError("请求大小不正确。")
             self._body_read = True
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError("请求格式不正确。")
             control = self.server.owner.control
-            if self.path in ("/api/cache", "/api/sync"):
-                allowed = {"start", "end", "scope", "account_scope"} if self.path == "/api/cache" else {"start", "end", "mode", "account_scope"}
+            if control.closed:
+                raise backend.DesktopError("后端正在关闭，请重新启动后再操作。")
+            if self.path in ("/api/cache", "/api/sync", "/api/export"):
+                allowed = ({"start", "end", "scope", "account_scope"} if self.path == "/api/cache"
+                           else {"start", "end", "mode", "account_scope", "export"}
+                           if self.path == "/api/sync" else {"start", "end", "mode", "account_scope"})
                 if not {"start", "end"} <= set(payload) <= allowed:
                     raise ValueError("请选择起止日期。")
                 dates = backend.validate_dates(payload["start"], payload["end"])
@@ -277,14 +377,40 @@ class _Handler(BaseHTTPRequestHandler):
                         raise ValueError("读取范围无效。")
                     self._send(200, control.summary(dates, scope=scope,
                                                    expected_account=payload.get("account_scope")))
-                else:
+                elif self.path == "/api/sync":
                     mode = payload.get("mode", "merge")
-                    if mode not in ("merge", "replace"):
+                    if mode not in ("merge", "replace") or not isinstance(payload.get("export", False), bool):
                         raise ValueError("同步模式无效。")
-                    self._send(202, control.start("sync", dates, mode=mode,
+                    kind = "sync_export" if payload.get("export") else "sync"
+                    self._send(202, control.start(kind, dates, mode=mode,
+                                                 expected_account=payload.get("account_scope")))
+                else:
+                    mode = payload.get("mode", "cumulative")
+                    if mode not in ("cumulative", "snapshot"):
+                        raise ValueError("导出模式无效。")
+                    self._send(202, control.start("export", dates, mode=mode,
                                                  expected_account=payload.get("account_scope")))
             elif self.path == "/api/login" and not payload:
                 self._send(202, control.start("login"))
+            elif self.path == "/api/credentials" and set(payload) == {"user_id", "pass_token"}:
+                try:
+                    self._send(200, control.idle_action(lambda: backend.save_credentials(
+                        payload["user_id"], payload["pass_token"], region="cn")))
+                finally:
+                    payload.clear()
+            elif self.path == "/api/selftest" and not payload:
+                self._send(202, control.start("selftest"))
+            elif self.path == "/api/open-exports" and not payload:
+                self._send(200, control.open_exports())
+            elif self.path == "/api/deletion-preview":
+                if not {"account_key"} <= set(payload) <= {"account_key", "start", "end", "categories"}:
+                    raise ValueError("请明确选择一个账号。")
+                self._send(200, self.server.owner.databases.preview(**payload))
+            elif self.path == "/api/delete" and set(payload) == {"token"}:
+                self._send(200, self.server.owner.databases.delete(payload["token"]))
+            elif self.path == "/api/shutdown" and not payload:
+                self._send(200, {"status": "closed"})
+                self.server.owner.request_shutdown()
             elif self.path == "/api/cancel" and set(payload) == {"id"}:
                 control.cancel(payload["id"])
                 self._send(200, {"status": "cancelling"})
