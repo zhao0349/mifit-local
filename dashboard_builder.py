@@ -24,7 +24,7 @@ INTRADAY_STYLES = ROOT / "dashboard" / "intraday-view.css"
 DEFAULT_OUTPUT = ROOT / "dashboard" / "output" / "健康仪表盘.html"
 
 
-def render_html(summary: dict) -> str:
+def render_html(summary: dict, *, local_token: str | None = None) -> str:
     """Embed JSON as inert script text; untrusted values cannot close the element."""
     if not isinstance(summary, dict) or summary.get("schema_version") != 1:
         raise ValueError("不支持的仪表盘数据格式。")
@@ -60,8 +60,19 @@ def render_html(summary: dict) -> str:
         "__INTRADAY_MODEL__": model_source.replace("</script", "<\\/script"),
     }
     # Substitute template markers once, never markers that happen to occur in data.
-    return re.sub("|".join(re.escape(marker) for marker in markers),
-                  lambda match: replacements[match.group()], template)
+    document = re.sub("|".join(re.escape(marker) for marker in markers),
+                      lambda match: replacements[match.group()], template)
+    if local_token is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", local_token):
+            raise ValueError("Invalid local session token")
+        panel = (ROOT / "dashboard" / "local-panel.html").read_text(encoding="utf-8")
+        script = (ROOT / "dashboard" / "local-control.js").read_text(encoding="utf-8")
+        document = document.replace("connect-src 'none'", "connect-src 'self'", 1)
+        document = document.replace('<!-- local-control-panel -->', panel, 1)
+        document = document.replace("</body>",
+            '<script data-local-only>\n' + script.replace("__LOCAL_TOKEN__", json.dumps(local_token))
+            .replace("</script", "<\\/script") + "\n</script>\n</body>", 1)
+    return document
 
 
 def generate(output: Path = DEFAULT_OUTPUT, *, demo: bool = False, db: Path | None = None) -> Path:

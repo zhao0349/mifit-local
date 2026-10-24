@@ -33,6 +33,8 @@ class App:
         self.cancellable = False
         self.buttons: list[ttk.Button] = []
         self.last_export: Path | None = None
+        self.active_account_scope: str | None = None
+        self.local_server = None
         root.title("小米运动健康 · 本地数据导出")
         root.geometry("920x800")
         root.minsize(840, 740)
@@ -93,21 +95,30 @@ class App:
         self.button(dates, "近 30 天", lambda: self.set_days(30)).pack(side="left", padx=4)
         self.button(dates, "近一年", lambda: self.set_days(365)).pack(side="left", padx=4)
         ttk.Label(
-            export, text="日期格式：YYYY-MM-DD，含起止日。导出更早记录时直接修改开始日期。",
+            export, text="日期用于云端同步或另存快照。默认更新当前账号的全部累计档案。",
             style="Sub.TLabel",
         ).pack(anchor="w", pady=(9, 12))
+        self.replace_history = tk.BooleanVar(value=False)
+        replace_toggle = ttk.Checkbutton(
+            export, text="覆盖当前账号历史（仅保留本次日期；需再次确认）",
+            variable=self.replace_history,
+        )
+        replace_toggle.pack(anchor="w", pady=(0, 10))
+        self.buttons.append(replace_toggle)
         actions = ttk.Frame(export)
         actions.pack(fill="x")
         self.button(actions, "同步并导出", self.sync_export).pack(side="left")
         self.button(actions, "仅导出已有缓存", self.export_cache).pack(side="left", padx=8)
         self.button(actions, "打开导出文件夹", self.open_exports).pack(side="left")
+        self.button(actions, "打开本机仪表盘", self.open_dashboard).pack(side="left", padx=8)
         self.stop_button = ttk.Button(actions, text="停止", command=self.cancel, state="disabled")
         self.stop_button.pack(side="right")
         ttk.Label(
             export,
-            text="每次保存到新文件夹。CSV 可直接用 Excel 打开；SQLite 缓存在本机 data 文件夹。",
+            text="累计 JSON/CSV 固定保存在当前账号的 current 文件夹；重复记录更新，不叠加。",
             style="Sub.TLabel",
         ).pack(anchor="w", pady=(12, 0))
+        self.button(export, "按日期另存独立快照", lambda: self.export_cache(snapshot=True)).pack(anchor="w", pady=(8, 0))
 
         status_row = ttk.Frame(main)
         status_row.pack(fill="x")
@@ -157,7 +168,16 @@ class App:
         self.output.configure(state="disabled")
 
     def refresh_account(self):
-        state = backend.credentials_status()
+        if not backend.interface_lock.acquire(blocking=False):
+            return
+        try:
+            state = backend.credentials_status()
+            scope = backend.account_scope()
+        finally:
+            backend.interface_lock.release()
+        if scope != self.active_account_scope:
+            self.last_export = None
+            self.active_account_scope = scope
         if not state["keyring_available"]:
             self.account_status.set("Windows 凭据管理器暂不可用")
         elif state["configured"]:
@@ -182,6 +202,9 @@ class App:
 
     def run(self, label, operation, *, cancellable=True):
         if self.busy:
+            return
+        if not backend.interface_lock.acquire(blocking=False):
+            self.status.set("网页中已有任务正在运行，请完成或取消后再操作。")
             return
         self.busy = True
         self.cancellable = cancellable
@@ -220,10 +243,15 @@ class App:
             finally:
                 self.loop = None
                 self.task = None
+                backend.interface_lock.release()
             self.events.put(("done", (outcome, result)))
 
         self.worker = threading.Thread(target=work, name="MiFit-worker", daemon=False)
-        self.worker.start()
+        try:
+            self.worker.start()
+        except Exception:
+            backend.interface_lock.release()
+            self.events.put(("done", ("后台任务未能启动，请重试。", None)))
 
     def poll(self):
         try:
@@ -284,15 +312,42 @@ class App:
         dates = self.dates()
         if not dates:
             return
+        replace = self.replace_history.get()
+        expected_account = None
+        if replace:
+            if not backend.interface_lock.acquire(blocking=False):
+                self.status.set("已有网页任务正在运行，请完成后再确认覆盖。")
+                return
+            try:
+                expected_account = backend.account_scope()
+                account = backend.credentials_status()
+            except backend.DesktopError:
+                expected_account = None
+            finally:
+                backend.interface_lock.release()
+            if not expected_account:
+                messagebox.showerror("无法覆盖", "请先配置当前账号。", parent=self.root)
+                return
+            if not messagebox.askyesno(
+                "确认覆盖当前账号历史",
+                f"账号 {account.get('account_masked', '')}：仅保留 {dates[0]} 至 {dates[1]} 的新记录。\n"
+                "全部同步成功后才替换；失败或取消保留旧历史。其他账号和已另存快照不受影响。",
+                parent=self.root,
+            ):
+                return
+            self.replace_history.set(False)
 
         async def action():
-            synced = await backend.sync(*dates, self.emit)
+            options = {"mode": "replace", "expected_account": expected_account} if replace else {}
+            synced = await backend.sync(*dates, self.emit, **options)
             if self.cancel_requested.is_set():
                 raise asyncio.CancelledError
             self.events.put(("exporting", None))
             exported = backend.export(*dates, self.emit)
             if synced["all_ok"] and not exported["empty"]:
                 exported["message"] = "同步及导出完成，点击“打开导出文件夹”查看。"
+            elif replace and not synced.get("committed"):
+                exported["message"] = "覆盖未完成，原有历史保持不变；已更新原缓存的累计导出。"
             elif synced["all_ok"]:
                 exported["message"] = "请求已完成，但所选日期没有记录。请核对账号、日期和手机同步情况。"
             else:
@@ -300,16 +355,16 @@ class App:
             return exported
         self.run("正在连接小米并同步数据…", action)
 
-    def export_cache(self):
+    def export_cache(self, *, snapshot=False):
         dates = self.dates()
         if not dates:
             return
 
         async def action():
-            result = backend.export(*dates, self.emit)
+            result = backend.export(*dates, self.emit, **({"mode": "snapshot"} if snapshot else {}))
             result["message"] = (
                 "缓存导出完成，点击“打开导出文件夹”查看。"
-                if not result["empty"] else "所选日期的缓存中没有记录，请先同步或修改日期。"
+                if not result["empty"] else "没有可导出的缓存记录，请先同步或修改快照日期。"
             )
             return result
         self.run("正在导出本机缓存…", action, cancellable=False)
@@ -351,8 +406,26 @@ class App:
     def open_help(self):
         webbrowser.open((ROOT / "使用说明.html").as_uri())
 
+    def start_local_server(self):
+        from local_server import LocalServer
+        if self.local_server is None:
+            self.local_server = LocalServer().start()
+
+    def open_dashboard(self):
+        try:
+            self.start_local_server()
+            webbrowser.open(self.local_server.url)
+        except OSError:
+            self.append("本机仪表盘未能启动，端口 17865 可能被占用；手动导入与桌面导出仍可使用。")
+
     def open_exports(self):
-        path = self.last_export or backend.EXPORTS_DIR
+        scope = backend.account_scope()
+        if scope != self.active_account_scope:
+            self.last_export = None
+            self.refresh_account()
+        base = backend._account_directory(backend.EXPORTS_DIR, scope) if scope else backend.EXPORTS_DIR
+        current = base / "current"
+        path = self.last_export or (current if current.is_dir() else base)
         path.mkdir(parents=True, exist_ok=True)
         os.startfile(str(path))
 
@@ -378,8 +451,16 @@ def main():
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
     try:
         root = tk.Tk()
-        App(root)
-        root.mainloop()
+        app = App(root)
+        try:
+            try:
+                app.start_local_server()
+            except OSError:
+                app.append("本机网页服务未能启动，请检查端口 17865；桌面导出仍可使用。")
+            root.mainloop()
+        finally:
+            if app.local_server:
+                app.local_server.close()
     finally:
         if mutex:
             kernel.CloseHandle.argtypes = [wintypes.HANDLE]

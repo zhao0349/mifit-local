@@ -1,0 +1,19 @@
+<section class="import-state" id="local-panel" data-local-only aria-label="本地后端控制">
+ <h2 style="font-size:16px;margin-top:0">本地后端</h2>
+ <p id="local-status" role="status">正在连接本机服务…</p>
+ <p id="local-account">正在读取账号配置…</p>
+ <p id="local-source">当前档案：尚未读取本地缓存。</p>
+ <div style="display:flex;flex-wrap:wrap;justify-content:flex-start;align-items:center;gap:10px;margin:12px 0">
+  <label>开始 <input id="local-start" type="date" required style="max-width:150px"></label>
+  <label>结束 <input id="local-end" type="date" required style="max-width:150px"></label>
+  <label>读取 <select id="local-read-scope"><option value="all">全部历史（默认）</option><option value="range">仅所选日期</option></select></label>
+  <button class="small-button" id="local-load" disabled>读取本地缓存</button>
+  <button class="small-button" id="local-sync" disabled>从小米同步</button>
+  <button class="small-button" id="local-login" disabled>小米官网登录</button>
+  <button class="small-button" id="local-cancel" disabled>取消任务</button>
+  <button class="small-button" id="local-reconnect">重新连接</button>
+ </div>
+ <label><input id="local-replace" type="checkbox"> 覆盖当前账号历史（仅保留所选日期，需确认）</label>
+ <p>默认追加更新：重复记录更新，其他历史保留。日期用于同步或限定读取；同步后点击“读取本地缓存”更新图表。手动导入仍可独立使用。</p>
+ <pre id="local-progress" aria-label="任务进度" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto;font:inherit"></pre>
+</section>

@@ -1,6 +1,7 @@
 """Synthetic Tk lifecycle checks; no credentials, health data, or network access."""
 
 import asyncio
+import gc
 import threading
 import time
 import tkinter as tk
@@ -16,7 +17,12 @@ import desktop_app
 @pytest.fixture
 def app(monkeypatch, tmp_path):
     """Disable all real backend entry points before constructing the hidden UI."""
+    # Finalize prior destroyed Tk applications on the Tk thread. Python 3.14
+    # can otherwise collect their callback cycles in a newly started worker.
+    gc.collect()
     backend = desktop_app.backend
+    monkeypatch.setattr(backend, "ROOT", tmp_path)
+    monkeypatch.setattr(backend, "account_scope", lambda: "synthetic-account")
     monkeypatch.setattr(backend, "EXPORTS_DIR", tmp_path / "exports")
     monkeypatch.setattr(
         backend,
@@ -60,6 +66,11 @@ def app(monkeypatch, tmp_path):
             original_destroy()
         except tk.TclError:
             pass
+        variable_names = [name for name, value in vars(application).items()
+                          if isinstance(value, tk.Variable)]
+        for name in variable_names:
+            setattr(application, name, None)
+        gc.collect()
         assert not callbacks, "Tk callback raised an exception"
 
 
@@ -380,3 +391,59 @@ def test_initial_width_fits_minimum_and_output_can_shrink(app):
     # The output Text expands/shrinks, so keep at least two lines at minimum size.
     fixed_height = app.root.winfo_reqheight() - app.output.winfo_reqheight()
     assert fixed_height + 40 <= minimum_height
+
+
+def test_web_operation_blocks_desktop_action_without_starting_worker(app):
+    with desktop_app.backend.interface_lock:
+        operation = Mock()
+        app.run("blocked", operation)
+        assert not app.busy
+        assert app.worker is None
+        operation.assert_not_called()
+
+
+def test_dashboard_opens_only_its_owned_loopback_service(app, monkeypatch):
+    import local_server
+    service = Mock(url="http://127.0.0.1:17865/")
+    service.start.return_value = service
+    factory = Mock(return_value=service)
+    monkeypatch.setattr(local_server, "LocalServer", factory)
+    opened = Mock()
+    monkeypatch.setattr(desktop_app.webbrowser, "open", opened)
+    app.open_dashboard()
+    app.open_dashboard()
+    factory.assert_called_once()
+    assert opened.call_count == 2
+    opened.assert_called_with(service.url)
+
+
+def test_replacement_requires_confirmation_and_resets_to_append(app, monkeypatch):
+    confirm = Mock(return_value=False)
+    monkeypatch.setattr(desktop_app.messagebox, "askyesno", confirm)
+    app.replace_history.set(True)
+    app.sync_export()
+    assert not app.busy
+    desktop_app.backend.sync.assert_not_called()
+    confirm.return_value = True
+    calls = []
+    async def sync(*args, **kwargs):
+        calls.append(kwargs)
+        raise desktop_app.backend.DesktopError("synthetic stop")
+    monkeypatch.setattr(desktop_app.backend, "sync", sync)
+    app.sync_export()
+    assert not app.replace_history.get()
+    pump_until(app, lambda: not app.busy)
+    assert calls == [{"mode": "replace", "expected_account": "synthetic-account"}]
+
+
+def test_open_exports_follows_account_switch_not_previous_result(app, monkeypatch, tmp_path):
+    old = tmp_path / "exports" / "synthetic-account" / "current"
+    old.mkdir(parents=True)
+    app.last_export = old
+    monkeypatch.setattr(desktop_app.backend, "account_scope", lambda: "different-account")
+    opened = Mock()
+    monkeypatch.setattr(desktop_app.os, "startfile", opened)
+    app.open_exports()
+    opened.assert_called_once_with(str(tmp_path / "exports" / "different-account"))
+    assert old.is_dir()
+    assert app.last_export is None

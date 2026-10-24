@@ -16,7 +16,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from record_archive import read_archive
+from record_archive import SCHEMA_PATH, read_archive
 
 ROOT = Path(__file__).resolve().parent
 TIMEZONE = "Asia/Shanghai"
@@ -62,8 +62,9 @@ def resolve_current_database() -> Path:
         account_key = settings.get("account_key")
         if not isinstance(account_key, str) or not re.fullmatch(r"[0-9a-f]{64}", account_key):
             raise ValueError
-        database = (root / "data" / account_key / "mi_fitness.db").resolve()
-        if not database.is_relative_to(root) or not database.is_file():
+        expected = root / "data" / account_key / "mi_fitness.db"
+        database = expected.resolve()
+        if database != expected or not database.is_file():
             raise ValueError
         return database
     except (OSError, ValueError, TypeError, AttributeError):
@@ -412,14 +413,46 @@ def _summarize(connection, generated_at=None):
     }
 
 
-def build_summary(db_path: Path) -> dict:
-    """Read a consistent, read-only SQLite snapshot with a bounded record archive."""
+def build_summary(db_path: Path, *, start: str | None = None, end: str | None = None) -> dict:
+    """Read a consistent, read-only snapshot with a bounded record archive.
+
+    Optional inclusive YYYY-MM-DD bounds must be supplied together. Filtering
+    uses Shanghai dates (sleep's wake date) for both summaries and raw details.
+    Invalid ranges and archive capacity failures raise DashboardDataError.
+    """
     try:
         path = Path(db_path).expanduser().resolve()
         if not path.is_file():
             raise DashboardDataError("找不到本地缓存，请先在桌面工具中同步数据。")
         with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as connection:
             connection.row_factory = sqlite3.Row
+            if start is not None or end is not None:
+                if not all(isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day)
+                           for day in (start, end)):
+                    raise ValueError("invalid range")
+                if date.fromisoformat(start) > date.fromisoformat(end):
+                    raise ValueError("invalid range")
+                schema = _schema(connection)
+                # Temporary views shadow main tables only on this connection.
+                # Both aggregation and raw detail reads use the same date range,
+                # with no copies, exports, or writes to the source database.
+                fields = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+                def in_range(value):
+                    day = _calendar_date(value)
+                    if day is None:
+                        parsed = _local_time(value)
+                        day = parsed.date().isoformat() if parsed else None
+                    return day is not None and start <= day <= end
+
+                connection.create_function("mifit_in_range", 1, in_range)
+                for source, table in _TABLES.items():
+                    column = fields[source]["date"]
+                    if table in schema and column in schema[table]:
+                        connection.execute(
+                            f'CREATE TEMP VIEW "{table}" AS SELECT * FROM main."{table}" '
+                            f'WHERE mifit_in_range("{column}")'
+                        )
             connection.execute("PRAGMA query_only = ON")
             connection.execute("BEGIN")
             try:

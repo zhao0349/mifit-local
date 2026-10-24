@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -40,6 +41,9 @@ DATA_TYPES = {
     "workout_detail": "运动明细及轨迹",
 }
 _operation_lock = threading.Lock()
+# Serializes whole user actions across the desktop and its local web interface,
+# including login and cache reads. Backend sync/export retain their own lock.
+interface_lock = threading.Lock()
 Emit = Callable[[str], None]
 
 
@@ -276,18 +280,101 @@ def _summarize(types: dict) -> dict:
     }
 
 
-async def sync(start: str, end: str, emit: Emit) -> dict:
-    """Synchronize in seven-day blocks; cancellation propagates to the GUI task."""
+def account_scope() -> str | None:
+    """Opaque local account key, including region; never a credential."""
+    try:
+        return _settings().get("account_key")
+    except DesktopError:
+        return None
+
+
+def _account_directory(root: Path, key: str) -> Path:
+    intended = root.resolve() / key
+    resolved = _inside(intended)
+    if resolved != intended:
+        raise DesktopError("账号目录不能重定向到其他位置。")
+    return resolved
+
+
+def _managed_child(base: Path, name: str) -> Path:
+    intended = base / name
+    resolved = _inside(intended)
+    if resolved != intended:
+        raise DesktopError("数据路径不能重定向到其他位置。")
+    return resolved
+
+
+def _replace_database(source_path: Path, target_path: Path) -> None:
+    """SQLite backup publishes all staged pages in one destination transaction."""
+    with (
+        closing(sqlite3.connect(f"{source_path.as_uri()}?mode=ro", uri=True)) as source,
+        closing(sqlite3.connect(target_path)) as target,
+    ):
+        source.backup(target)
+
+
+async def sync(start: str, end: str, emit: Emit, *, mode="merge", expected_account=None) -> dict:
+    """Upsert by default. Explicit replacement publishes only a complete sync.
+
+    Replacement is bound to the account confirmed by the caller. Failures and
+    cancellation discard staging and leave that account's existing cache intact.
+    """
     start, end = validate_dates(start, end)
+    if mode not in {"merge", "replace"}:
+        raise ValueError("不支持的更新方式。")
     if not _operation_lock.acquire(blocking=False):
         raise DesktopError("已有任务正在运行，请稍后再试。")
+    staging = None
+    try:
+        credentials = _read_credentials()
+        key = credentials[2]["account_key"]
+        if mode == "replace" and (not expected_account or expected_account != key):
+            raise DesktopError("账号已变化或尚未确认，未覆盖任何历史数据。")
+        target = _managed_child(_account_directory(DATA_DIR, key), "mi_fitness.db")
+        if mode == "replace":
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staging = _inside(target.parent / f".replace-{uuid4().hex}.db")
+            emit("覆盖模式：先获取所选日期，全部成功后才替换当前账号历史。")
+        result = await _sync_account(start, end, emit, credentials, staging or target)
+        result["mode"] = mode
+        result["committed"] = mode == "merge"
+        if staging:
+            if result["all_ok"]:
+                _replace_database(staging, target)
+                result["committed"] = True
+                emit("当前账号历史已替换为本次所选范围；其他账号不变。")
+            else:
+                emit("覆盖同步未全部成功，原有历史保持不变；本次暂存结果未发布。")
+        return result
+    except asyncio.CancelledError:
+        if staging:
+            emit("覆盖已取消：暂存结果未发布，原有历史保持不变。")
+        raise
+    except DesktopError:
+        if staging:
+            emit("覆盖未完成：暂存结果未发布，原有历史保持不变。")
+        raise
+    except Exception:
+        raise DesktopError("同步未完成；覆盖模式下原有历史未被替换。") from None
+    finally:
+        try:
+            if staging:
+                # Cleanup must not turn an already committed replacement into a
+                # reported failure (for example if antivirus holds the file).
+                with suppress(OSError):
+                    staging.unlink(missing_ok=True)
+        finally:
+            _operation_lock.release()
+
+
+async def _sync_account(start, end, emit, credentials, db_path) -> dict:
+    """Fetch into one account database; caller owns the operation lock."""
     adapter = None
     try:
         from mi_fitness_mcp.services.sync_service import SyncService
         from mi_fitness_mcp.storage import Database
 
-        user_id, token, settings = _read_credentials()
-        db_path = _inside(DATA_DIR / settings["account_key"] / "mi_fitness.db")
+        user_id, token, settings = credentials
         adapter = _new_adapter(user_id, token, settings["region"])
         types = {name: _type_result() for name in DATA_TYPES}
         emit("正在连接小米云端。")
@@ -355,16 +442,13 @@ async def sync(start: str, end: str, emit: Emit) -> dict:
     except Exception:
         raise DesktopError("同步发生异常，已保存的数据仍保留在本机。") from None
     finally:
-        try:
-            if adapter is not None:
-                try:
-                    await asyncio.wait_for(adapter.close(), timeout=10)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    emit("云端连接清理未完成；请关闭程序后重新打开。")
-        finally:
-            _operation_lock.release()
+        if adapter is not None:
+            try:
+                await asyncio.wait_for(adapter.close(), timeout=10)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                emit("云端连接清理未完成；请关闭程序后重新打开。")
 
 
 def _unique_directory(base: Path) -> Path:
@@ -391,7 +475,7 @@ def _export_local_date(value: str) -> str:
         raise ValueError("本地记录的时间格式无效。") from None
 
 
-def _export_database(db_path: Path, directory: Path, start: str, end: str, emit: Emit) -> dict:
+def _export_database(db_path: Path, directory: Path, start: str | None, end: str | None, emit: Emit) -> dict:
     from mi_fitness_mcp.export import DATASETS, export_database
 
     snapshot = directory / ".export-snapshot.db"
@@ -423,7 +507,7 @@ def _export_database(db_path: Path, directory: Path, start: str, end: str, emit:
                             f"DELETE FROM {table_sql} "
                             f"WHERE desktop_local_date({column_sql}) < ? "
                             f"OR desktop_local_date({column_sql}) > ?",
-                            (start, end),
+                            (start or "0001-01-01", end or "9999-12-31"),
                         )
             except sqlite3.Error:
                 if invalid_date:
@@ -442,7 +526,8 @@ def _export_database(db_path: Path, directory: Path, start: str, end: str, emit:
         json_path = directory / "mi_fitness.json"
         payload = json.loads(json_path.read_text(encoding="utf-8"))
         payload["filters"].update(
-            {"start_date": start, "end_date": end, "timezone": LOCAL_TIMEZONE}
+            {"start_date": start, "end_date": end, "timezone": LOCAL_TIMEZONE,
+             "scope": "all_cached" if start is None else "date_range"}
         )
         json_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -451,7 +536,8 @@ def _export_database(db_path: Path, directory: Path, start: str, end: str, emit:
         emit(
             f"导出完成，共 {total_rows} 条记录，已生成 CSV 和 JSON。"
             if total_rows else
-            "指定日期范围内没有本地记录；已生成空 CSV 和 JSON，请先同步或调整日期。"
+            ("当前账号没有本地记录；已生成空 CSV 和 JSON，请先同步。" if start is None else
+             "指定日期范围内没有本地记录；已生成空 CSV 和 JSON，请先同步或调整日期。")
         )
         return {
             "directory": str(directory),
@@ -464,9 +550,56 @@ def _export_database(db_path: Path, directory: Path, start: str, end: str, emit:
         snapshot.unlink(missing_ok=True)
 
 
-def export(start: str, end: str, emit: Emit) -> dict:
-    """Export the selected account's cached records without reading its token."""
+def _export_cumulative(db_path: Path, base: Path, emit: Emit) -> dict:
+    """Publish a complete JSON/CSV generation with rollback and crash recovery.
+
+    Only the owned current/staging/previous directories are moved or removed.
+    Legacy timestamp exports are preserved. A crash between the two renames is
+    recovered on the next export before building a new generation.
+    """
+    base.mkdir(parents=True, exist_ok=True)
+    current = _managed_child(base, "current")
+    previous = _managed_child(base, ".current-previous")
+    if previous.exists():
+        if current.exists():
+            shutil.rmtree(previous)
+        else:
+            previous.replace(current)
+    staging = _managed_child(base, f".export-{uuid4().hex}")
+    staging.mkdir()
+    try:
+        messages = []
+        result = _export_database(db_path, staging, None, None, messages.append)
+        if current.exists():
+            current.replace(previous)
+        try:
+            staging.replace(current)
+        except Exception:
+            if previous.exists() and not current.exists():
+                previous.replace(current)
+            raise
+        result["files"] = [str(current / Path(path).relative_to(staging)) for path in result["files"]]
+        result["directory"] = str(current)
+        result["mode"] = "cumulative"
+        if previous.exists():
+            # A locked old file can wait for next-run cleanup; the new generation
+            # has already been published successfully.
+            with suppress(OSError):
+                shutil.rmtree(previous)
+        for message in messages:
+            emit(message)
+        emit("已更新当前账号的累计档案，包含全部已缓存历史。")
+        return result
+    finally:
+        if staging.exists():
+            shutil.rmtree(_managed_child(base, staging.name))
+
+
+def export(start: str, end: str, emit: Emit, *, mode="cumulative") -> dict:
+    """Refresh one account's cumulative archive; snapshots are explicit opt-in."""
     start, end = validate_dates(start, end)
+    if mode not in {"cumulative", "snapshot"}:
+        raise ValueError("不支持的导出方式。")
     if not _operation_lock.acquire(blocking=False):
         raise DesktopError("已有任务正在运行，请稍后再试。")
     try:
@@ -474,11 +607,14 @@ def export(start: str, end: str, emit: Emit) -> dict:
         account_key = settings.get("account_key")
         if not account_key:
             raise DesktopError("尚未配置账号，请先保存凭据并同步。")
-        db_path = _inside(DATA_DIR / account_key / "mi_fitness.db")
+        db_path = _managed_child(_account_directory(DATA_DIR, account_key), "mi_fitness.db")
         if not db_path.is_file():
             raise DesktopError("当前账号尚无本地数据，请先执行同步。")
-        directory = _unique_directory(EXPORTS_DIR / account_key)
-        return _export_database(db_path, directory, start, end, emit)
+        base = _account_directory(EXPORTS_DIR, account_key)
+        if mode == "snapshot":
+            directory = _unique_directory(base)
+            return _export_database(db_path, directory, start, end, emit)
+        return _export_cumulative(db_path, base, emit)
     except DesktopError:
         raise
     except Exception:
