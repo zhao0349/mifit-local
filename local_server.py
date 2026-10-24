@@ -53,14 +53,15 @@ idempotent and completion is reported only after async resource cleanup.
 
     def status(self):
         account = None
-        # Reading status must never probe Xiaomi or race credential replacement.
-        if backend.interface_lock.acquire(blocking=False):
-            try:
-                account = backend.credentials_status()
-                account["scope"] = backend.account_scope()
-            finally:
-                backend.interface_lock.release()
         with self.lock:
+            # A stopped backend exposes only its lifecycle state. The small
+            # launcher stays available without reopening the credential vault.
+            if not self.closed and backend.interface_lock.acquire(blocking=False):
+                try:
+                    account = backend.credentials_status()
+                    account["scope"] = backend.account_scope()
+                finally:
+                    backend.interface_lock.release()
             return {"service": "mifit-local", "version": 1, "account": account,
                     "busy": backend.interface_lock.locked(), "closed": self.closed,
                     "job": copy.deepcopy(self.job)}
@@ -207,8 +208,9 @@ idempotent and completion is reported only after async resource cleanup.
             self.worker.join()
 
     def summary(self, dates, *, scope="all", expected_account=None):
-        if not backend.interface_lock.acquire(blocking=False):
-            raise backend.DesktopError(BUSY)
+        with self.lock:
+            if self.closed or not backend.interface_lock.acquire(blocking=False):
+                raise backend.DesktopError(BUSY)
         try:
             if expected_account is not None and expected_account != backend.account_scope():
                 raise backend.DesktopError("账号已变化，请刷新账号状态后重新读取；当前档案未改动。")
@@ -237,7 +239,12 @@ class LocalServer:
         self.control = LocalControl()
         self.databases = DatabaseManager()
         self.closed = threading.Event()
+        self.backend_stopped = threading.Event()
         self._close_lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._stopping = False
+        self._terminating = False
+        self._shutdown_thread = None
         self.token = secrets.token_urlsafe(32)
         self.httpd = _HTTPServer(("127.0.0.1", port), _Handler)
         self.httpd.owner = self
@@ -261,23 +268,80 @@ class LocalServer:
         return self
 
     def close(self):
+        """Terminate the launcher itself, including any backend still draining."""
         with self._close_lock:
             if self.closed.is_set():
                 return
             try:
-                self.control.close()
-                # Drain an in-flight cache read, credential save or deletion.
+                with self._lifecycle_lock:
+                    self._terminating = True
+                    shutdown_thread = self._shutdown_thread
+                    with self.control.lock:
+                        self.control.closed = True
+                if shutdown_thread:
+                    shutdown_thread.join()
+                else:
+                    self.control.close()
                 with backend.interface_lock:
-                    self.httpd.shutdown()
-                    self.httpd.server_close()
-                    self.thread.join()
+                    pass  # Drain an already admitted cache/file operation.
+                self.httpd.shutdown()
+                self.httpd.server_close()
+                self.thread.join()
             finally:
                 self.closed.set()
 
     def request_shutdown(self):
-        with self.control.lock:
-            self.control.closed = True
-        threading.Thread(target=self.close, name="MiFit-shutdown", daemon=False).start()
+        """Stop data operations while retaining the local page's start endpoint."""
+        with self._lifecycle_lock:
+            if self._terminating:
+                raise backend.DesktopError("本机启动器正在退出，请重新运行启动程序。")
+            if self.control.closed:
+                return
+            with self.control.lock:
+                self.control.closed = True
+            self._stopping = True
+            self.backend_stopped.clear()
+            self._shutdown_thread = threading.Thread(
+                target=self._stop_backend, args=(self.control,), name="MiFit-stop-backend", daemon=False,
+            )
+            self._shutdown_thread.start()
+
+    def _stop_backend(self, control):
+        try:
+            control.close()
+            with backend.interface_lock:
+                pass
+        finally:
+            with self._lifecycle_lock:
+                self._stopping = False
+                self.backend_stopped.set()
+
+    def activate(self):
+        """Explicitly enable local operations; never log in or sync on its own."""
+        with self._lifecycle_lock:
+            if self._terminating or self.closed.is_set():
+                raise backend.DesktopError("本机启动器正在退出，请重新运行启动程序。")
+            if self._stopping:
+                raise backend.DesktopError("后端正在收尾，请稍后再开启。")
+            if self.control.closed:
+                self.control = LocalControl()
+                self.databases = DatabaseManager()
+                self._shutdown_thread = None
+                self.backend_stopped.clear()
+            return {"status": "ok"}
+
+    def status(self):
+        state = self.control.status()
+        state["stopping"] = self._stopping
+        return state
+
+    def database_action(self, method, *args, **kwargs):
+        # Database methods own the operation locks; keep admission and shutdown
+        # ordered without acquiring those locks for a second time here.
+        with self._lifecycle_lock:
+            if self.control.closed or self._terminating:
+                raise backend.DesktopError("后端暂未运行，请先开启后端。")
+            return getattr(self.databases, method)(*args, **kwargs)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -336,7 +400,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, self.server.owner.page,
                        "text/html; charset=utf-8")
         elif self.path == "/api/status":
-            self._send(200, self.server.owner.control.status())
+            self._send(200, self.server.owner.status())
         elif self.path == "/health":
             self._send(200, {"service": "mifit-local", "version": 2,
                              "installation": installation_id()})
@@ -345,7 +409,7 @@ class _Handler(BaseHTTPRequestHandler):
                        "text/html; charset=utf-8")
         elif self.path == "/api/accounts":
             try:
-                self._send(200, self.server.owner.databases.inventory())
+                self._send(200, self.server.owner.database_action("inventory"))
             except backend.DesktopError as exc:
                 self._send(409, {"error": str(exc)})
             except Exception:
@@ -368,11 +432,18 @@ class _Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError("请求格式不正确。")
+            if self.path == "/api/start" and not payload:
+                self._send(200, self.server.owner.activate())
+                return
+            if self.path == "/api/shutdown" and not payload:
+                self.server.owner.request_shutdown()
+                self._send(200, {"status": "closed"})
+                return
             control = self.server.owner.control
             if control.closed:
-                raise backend.DesktopError("后端正在关闭，请重新启动后再操作。")
+                raise backend.DesktopError("后端暂未运行，请先开启后端。")
             if self.path in ("/api/cache", "/api/sync", "/api/export"):
-                allowed = ({"start", "end", "scope", "account_scope"} if self.path == "/api/cache"
+                allowed = ({"start", "end", "scope", "account_scope", "account_key"} if self.path == "/api/cache"
                            else {"start", "end", "mode", "account_scope", "export"}
                            if self.path == "/api/sync" else {"start", "end", "mode", "account_scope"})
                 if not {"start", "end"} <= set(payload) <= allowed:
@@ -382,8 +453,13 @@ class _Handler(BaseHTTPRequestHandler):
                     scope = payload.get("scope", "all")
                     if scope not in ("all", "range"):
                         raise ValueError("读取范围无效。")
-                    self._send(200, control.summary(dates, scope=scope,
-                                                   expected_account=payload.get("account_scope")))
+                    if "account_key" in payload:
+                        options = {"start": dates[0], "end": dates[1]} if scope == "range" else {}
+                        self._send(200, self.server.owner.database_action(
+                            "summary", payload["account_key"], **options))
+                    else:
+                        self._send(200, control.summary(dates, scope=scope,
+                                                       expected_account=payload.get("account_scope")))
                 elif self.path == "/api/sync":
                     mode = payload.get("mode", "merge")
                     if mode not in ("merge", "replace") or not isinstance(payload.get("export", False), bool):
@@ -412,12 +488,9 @@ class _Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/deletion-preview":
                 if not {"account_key"} <= set(payload) <= {"account_key", "start", "end", "categories"}:
                     raise ValueError("请明确选择一个账号。")
-                self._send(200, self.server.owner.databases.preview(**payload))
+                self._send(200, self.server.owner.database_action("preview", **payload))
             elif self.path == "/api/delete" and set(payload) == {"token"}:
-                self._send(200, self.server.owner.databases.delete(payload["token"]))
-            elif self.path == "/api/shutdown" and not payload:
-                self._send(200, {"status": "closed"})
-                self.server.owner.request_shutdown()
+                self._send(200, self.server.owner.database_action("delete", payload["token"]))
             elif self.path == "/api/cancel" and set(payload) == {"id"}:
                 control.cancel(payload["id"])
                 self._send(200, {"status": "cancelling"})

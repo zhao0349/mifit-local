@@ -328,7 +328,7 @@ def test_database_routes_require_one_account_and_confirmed_token(server):
     server.databases.delete.assert_called_once_with("confirmation")
 
 
-def test_shutdown_stops_server_and_cancels_sync(server, monkeypatch):
+def test_shutdown_keeps_start_endpoint_and_cancels_sync(server, monkeypatch):
     cleaned = threading.Event()
 
     async def sync(*args):
@@ -340,6 +340,18 @@ def test_shutdown_stops_server_and_cancels_sync(server, monkeypatch):
     monkeypatch.setattr(local_server.backend, "sync", sync)
     request(server, "/api/sync", {"start": "2026-01-01", "end": "2026-01-02"})
     assert request(server, "/api/shutdown", {})[1] == {"status": "closed"}
-    assert server.closed.wait(3)
+    assert server.backend_stopped.wait(3)
     assert cleaned.is_set()
-    assert not server.thread.is_alive()
+    assert server.thread.is_alive()
+    assert request(server, "/api/status")[1]["closed"]
+
+
+def test_cache_can_read_selected_account_without_changing_sync_account(server):
+    server.databases = Mock()
+    server.databases.summary.return_value = {"days": []}
+    payload = {"start": "2026-01-01", "end": "2026-01-02", "account_key": "selected"}
+    assert request(server, "/api/cache", payload)[0] == 200
+    server.databases.summary.assert_called_once_with("selected")
+    assert local_server.backend.account_scope() == "synthetic-account"
+    assert request(server, "/api/cache", {**payload, "scope": "range"})[0] == 200
+    server.databases.summary.assert_called_with("selected", start="2026-01-01", end="2026-01-02")

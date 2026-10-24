@@ -1,0 +1,41 @@
+/* Native selects retain form/value semantics; their popup is themed separately. */
+select.mifit-select{appearance:none;-webkit-appearance:none;cursor:pointer;padding-right:28px!important;min-height:36px;border:1px solid var(--border);border-radius:9px;background-color:var(--panel);color:var(--text);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='m2 2 4 4 4-4' fill='none' stroke='%235b6c68' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")!important;background-repeat:no-repeat!important;background-position:right 10px center!important}
+:root[data-theme=dark] select.mifit-select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='m2 2 4 4 4-4' fill='none' stroke='%23adbeb4' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")!important}
+select.mifit-select:hover{border-color:var(--accent)}select.mifit-select:disabled{cursor:default;opacity:.5}
+#select-picker-dialog{position:fixed;inset:auto;margin:0;width:260px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);padding:8px;border:1px solid var(--border);border-radius:13px;background:var(--panel);color:var(--text);box-shadow:0 12px 40px #0002;overflow:hidden;font-size:13px}
+#select-picker-dialog::backdrop{background:transparent;backdrop-filter:none}
+#select-picker-dialog [hidden]{display:none!important}
+.select-picker-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:3px 5px 7px}
+.select-picker-heading h2{margin:0;font-size:12px;font-weight:550;color:var(--muted);overflow-wrap:anywhere}
+#select-picker-dialog button{font:inherit;color:var(--text);border:0;background:none;border-radius:8px}
+#select-picker-dialog #select-picker-close{width:28px;height:28px;min-height:28px;flex-shrink:0;padding:0;font-size:20px;color:var(--muted)}
+#select-picker-list{max-height:min(360px,65dvh);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
+#select-picker-dialog .select-picker-option{display:block;text-align:left;width:100%;min-height:39px;padding:9px 12px;font-size:13px;white-space:normal;overflow-wrap:anywhere;margin:2px 0}
+#select-picker-dialog .select-picker-option:hover,#select-picker-dialog .select-picker-option:focus-visible{background:var(--soft)}
+#select-picker-dialog .select-picker-option[aria-selected=true]{background:var(--accent-soft);color:var(--accent);font-weight:650}
+#select-picker-dialog button:disabled{cursor:default;opacity:.4}
+.select-picker-handle{display:none}
+#select-picker-wheel-wrap{position:relative;isolation:isolate}
+.select-picker-selection{position:absolute;z-index:-1;top:88px;left:0;right:0;height:44px;border-radius:10px;background:var(--accent-soft);border:1px solid var(--border);pointer-events:none}
+#select-picker-wheel{height:220px;overflow-x:hidden;overflow-y:auto;padding:88px 0;scroll-snap-type:y mandatory;overscroll-behavior:contain;touch-action:pan-y;scrollbar-width:none;-webkit-overflow-scrolling:touch;outline-offset:1px!important;border-radius:10px;mask-image:linear-gradient(transparent,#000 32%,#000 68%,transparent)}
+#select-picker-wheel::-webkit-scrollbar{display:none}
+.select-picker-wheel-item{height:44px;min-height:44px;padding:0 12px;display:flex;align-items:center;justify-content:center;text-align:center;scroll-snap-align:center;scroll-snap-stop:normal;color:var(--muted);font-size:15px;line-height:1.3;overflow-wrap:anywhere;user-select:none;cursor:pointer}
+.select-picker-wheel-item[aria-selected=true]{color:var(--accent);font-weight:650;font-size:16px}
+.select-picker-wheel-item[aria-disabled=true]{opacity:.35}
+.select-picker-hint{font-size:11px;color:var(--faint);text-align:center;margin:9px 0 0}
+.select-picker-actions{display:flex;justify-content:flex-end;gap:9px;border-top:1px solid var(--border);margin-top:16px;padding-top:13px}
+#select-picker-dialog .select-picker-actions button{min-height:42px;padding:8px 18px;font-size:13px}
+#select-picker-dialog #select-picker-confirm{background:var(--accent);color:var(--panel);font-weight:650}
+@media(max-width:690px){
+ select.mifit-select{min-height:40px}
+ #select-picker-dialog[data-mode=wheel]{inset:auto 0 0!important;width:100%!important;max-width:100%;max-height:calc(100dvh - 16px);margin:0;padding:10px 20px max(20px,env(safe-area-inset-bottom));border-radius:24px 24px 0 0;border-bottom:0;box-shadow:0 -15px 70px #0003;animation:select-picker-rise .18s ease-out}
+ #select-picker-dialog[data-mode=wheel]::backdrop{background:#071a1580;backdrop-filter:blur(4px)}
+ #select-picker-dialog[data-mode=wheel] .select-picker-handle{display:block;width:34px;height:4px;background:var(--border);border-radius:9px;margin:0 auto 15px}
+ #select-picker-dialog[data-mode=wheel] .select-picker-heading{padding:0 0 18px}
+ #select-picker-dialog[data-mode=wheel] h2{font-size:17px;color:var(--text);font-weight:650}
+ #select-picker-dialog[data-mode=wheel] #select-picker-close{width:34px;height:34px;font-size:23px}
+ #select-picker-dialog .select-picker-option{min-height:44px}
+}
+@keyframes select-picker-rise{from{transform:translateY(24px);opacity:.5}to{transform:translateY(0);opacity:1}}
+@media(prefers-reduced-motion:reduce){#select-picker-dialog{animation:none!important}}
+@media print{#select-picker-dialog{display:none!important}}

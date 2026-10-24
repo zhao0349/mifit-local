@@ -38,7 +38,11 @@ def reopen_running():
 
 
 def run_service(*, server_factory=LocalServer, open_browser=None):
-    """Keep the backend alive until the page explicitly shuts it down."""
+    """Keep the local launcher available for the page's backend start/stop.
+
+    Stopping data operations leaves this small loopback launcher running. Full
+    process shutdown calls ``LocalServer.close`` and releases the listening port.
+    """
     server = server_factory().start()
     try:
         if not (open_browser or webbrowser.open)(server.url):

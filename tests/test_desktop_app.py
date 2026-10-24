@@ -8,7 +8,7 @@ import pytest
 import desktop_app
 
 
-def test_launcher_opens_page_and_waits_for_explicit_shutdown():
+def test_launcher_opens_page_and_waits_for_full_launcher_shutdown():
     server = Mock(url="http://127.0.0.1:12345/")
     server.start.return_value = server
     server.closed = threading.Event()

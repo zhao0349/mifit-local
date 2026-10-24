@@ -16,12 +16,13 @@
   </section>
   <section class="local-section" aria-labelledby="local-data-title">
    <div class="local-section-head"><h3 id="local-data-title">同步与导出</h3><span class="local-muted">北京时间 · 包含起止日</span></div>
+   <p class="local-muted">同步与导出使用上方登录账号；右上角账号选择仅切换展示的缓存。</p>
    <div class="local-fields local-date-fields"><label>开始日期<input id="local-start" type="date" required></label><label>结束日期<input id="local-end" type="date" required></label><div class="local-shortcuts"><button class="small-button" id="local-last-month">近 30 天</button><button class="small-button" id="local-last-year">近一年</button></div></div>
    <label class="local-check"><input id="local-replace" type="checkbox">覆盖当前账号历史，仅保留所选日期（需再次确认）</label>
    <div class="local-actions"><button class="small-button local-primary" id="local-sync-export" disabled>同步并导出</button><button class="small-button" id="local-sync" disabled>从小米同步</button><button class="small-button" id="local-export" disabled>仅导出所有缓存</button><button class="small-button" id="local-snapshot" disabled>另存所选日期快照</button><button class="small-button" id="local-open-exports" disabled>打开导出文件夹</button></div>
    <p class="local-muted">默认追加更新，重复记录更新、其他历史保留。累计 JSON / CSV 包含当前账号的全部缓存；日期用于同步及另存快照。</p>
    <div class="local-load-row"><label>读取范围<select id="local-read-scope"><option value="all">全部历史（默认）</option><option value="range">仅所选日期</option></select></label><button class="small-button" id="local-load" disabled>读取本地缓存</button></div>
-   <p class="local-muted">点击“读取本地缓存”才会更新图表。同步和导出不会替换当前手动导入的档案。</p>
+   <p class="local-muted">连接后自动读取默认账号；右上角可切换查看账号。同步与导出使用上方登录账号，不会替换当前手动导入的档案。</p>
   </section>
   <section class="local-section local-job" aria-labelledby="local-progress-title"><div class="local-section-head"><h3 id="local-progress-title">任务进度</h3><button class="small-button" id="local-cancel" disabled>取消任务</button></div><pre id="local-progress" aria-label="任务进度">尚未开始任务。</pre></section>
   <details id="local-database" class="local-section local-database"><summary>数据库管理<span>账号、日期范围与磁盘占用</span></summary>

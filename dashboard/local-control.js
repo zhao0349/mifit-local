@@ -11,8 +11,25 @@
   let polling = false, generation = 0, explicitlyClosed = false;
   let loadingCache = false, loadedCacheAccount = null, account = null;
   let inventory = null, inventoryPending = false;
+  let inventoryNeeded = true, manuallyImported = false, cacheRequest = 0;
   let confirmDeadline = 0, confirmTimer = null;
-  $("backend-help").hidden = true;
+  const accountCookie = "mifit_view_account";
+  $("dashboard-account").replaceChildren(new Option("读取账号列表…", ""));
+
+  function rememberedAccount() {
+    const cookie = document.cookie.split(";").map(value => value.trim()).find(value => value.startsWith(accountCookie + "="));
+    try { return cookie ? decodeURIComponent(cookie.slice(accountCookie.length + 1)) : null; }
+    catch { return null; }
+  }
+  function rememberAccount(key) {
+    document.cookie = `${accountCookie}=${encodeURIComponent(key)}; Path=/; Max-Age=31536000; SameSite=Strict`;
+  }
+  function openBackend() {
+    const panel = connected && !explicitlyClosed ? $("local-panel") : $("backend-help");
+    panel.hidden = false;
+    if (!panel.open) panel.showModal();
+  }
+  window.MiFitLocalControl = {open:openBackend};
 
   function notify(message) {
     $("local-feedback").textContent = message;
@@ -38,7 +55,7 @@
     return inventory?.accounts.find(item => item.account_key === $("db-account").value);
   }
   function controls() {
-    const blocked = !connected || busy || pending || dashboard.isImporting();
+    const blocked = !connected || busy || pending || inventoryPending || dashboard.isImporting();
     ["local-load", "local-sync", "local-sync-export", "local-export", "local-snapshot", "local-login",
       "local-start", "local-end", "local-read-scope", "local-replace", "local-last-month", "local-last-year",
       "local-save-credentials", "local-user-id", "local-pass-token", "local-selftest", "local-open-exports"
@@ -46,6 +63,8 @@
     $("local-cancel").disabled = !connected || pending || job?.status !== "running" ||
       !(job.cancellable ?? ["sync", "sync_export", "login"].includes(job.kind));
     $("local-shutdown").disabled = !connected || pending;
+    $("dashboard-account").disabled = blocked || !inventory?.accounts.some(item => !item.error);
+    $("backend-start").disabled = pending;
     $("db-refresh").disabled = blocked || inventoryPending;
     $("db-account").disabled = blocked || inventoryPending || !inventory?.accounts.length;
     const hasAccount = !!selectedAccount() && !selectedAccount().error;
@@ -63,7 +82,11 @@
         body:body === undefined ? undefined : JSON.stringify(body), signal:abort.signal,
       });
       const value = await response.json();
-      if (!response.ok) throw new Error(value.error || "本机请求未完成。");
+      if (!response.ok) {
+        const error = new Error(value.error || "本机请求未完成。");
+        error.status = response.status;
+        throw error;
+      }
       return value;
     } finally { clearTimeout(timeout); }
   }
@@ -76,9 +99,10 @@
   }
   function disconnected() {
     connected = false;
+    inventoryNeeded = true;
     setIndicator(explicitlyClosed ? "closed" : "disconnected");
     $("local-status").textContent = explicitlyClosed
-      ? "后端已关闭。当前网页仍可手动导入与查看；重新运行启动程序后可再次连接。"
+      ? "后端已关闭。当前网页仍可手动导入与查看；点击左下角入口可重新开启。"
       : "本地连接已断开。当前档案已保留；运行启动程序后重新连接，或刷新页面。";
     controls();
   }
@@ -91,6 +115,8 @@
       if (revision !== generation) return;
       if (state.service !== "mifit-local" || state.version !== 1) throw new Error("服务不匹配");
       if (state.closed) { explicitlyClosed = true; disconnected(); return; }
+      if (!connected || (job?.status === "running" && state.job?.status !== "running") ||
+          (state.account && account && state.account.scope !== account.scope)) inventoryNeeded = true;
       connected = true; explicitlyClosed = false; busy = state.busy; job = state.job;
       if (state.account) account = state.account;
       setIndicator(job?.status === "running" && ["sync", "sync_export"].includes(job.kind) ? "syncing" : "connected");
@@ -107,6 +133,7 @@
       if (exportDirectory) lines.push("导出位置：" + exportDirectory);
       $("local-progress").textContent = lines.join("\n");
       controls();
+      if (inventoryNeeded && !busy && !pending) await refreshInventory({automatic:true});
     } catch { if (revision === generation) disconnected(); }
     finally {
       polling = false;
@@ -155,21 +182,41 @@
   $("local-last-month").addEventListener("click", () => setRecent(30));
   $("local-last-year").addEventListener("click", () => setRecent(365));
 
-  $("local-load").addEventListener("click", () => act(async () => {
+  async function loadAccount(key, {scope="all", remember=false, quiet=false} = {}) {
     const revision = dashboard.getRevision();
-    const scope = $("local-read-scope").value;
-    const loadedAccount = account;
+    const serial = ++cacheRequest;
+    const selected = inventory?.accounts.find(item => item.account_key === key);
     const range = dates();
-    const summary = await request("/api/cache", {...range, scope, account_scope:loadedAccount?.scope});
-    if (dashboard.isImporting() || revision !== dashboard.getRevision()) {
+    const identity = key ? {account_key:key} : {account_scope:account?.scope};
+    const summary = await request("/api/cache", {...range, scope, ...identity});
+    if (serial !== cacheRequest || dashboard.isImporting() || revision !== dashboard.getRevision()) {
       throw new Error("已保留手动导入的档案；需要时请再次读取缓存。");
     }
     loadingCache = true;
-    try { dashboard.adoptSummary(summary); loadedCacheAccount = loadedAccount?.scope; }
+    try {
+      dashboard.adoptSummary(summary);
+      loadedCacheAccount = key || account?.scope;
+      manuallyImported = false;
+      $("dashboard-account").value = key || "";
+      if (remember && key) rememberAccount(key);
+    }
     finally { loadingCache = false; }
-    $("local-source").textContent = "当前档案：账号 " + (loadedAccount?.account_masked || "") + " 的本地缓存（" + (scope === "all" ? "全部已缓存历史" : range.start + " 至 " + range.end) + "）。";
-    notify(summary.days.length ? "本地缓存已载入。" : scope === "all" ? "当前账号没有缓存记录，请先同步。" : "所选日期没有缓存记录；可修改日期或同步。");
+    $("local-source").textContent = "当前档案：" + (selected?.label || "账号 " + (account?.account_masked || "")) + " 的本地缓存（" + (scope === "all" ? "全部已缓存历史" : range.start + " 至 " + range.end) + "）。";
+    if (!quiet) notify(summary.days.length ? "本地缓存已载入。" : scope === "all" ? "当前账号没有缓存记录，请先同步。" : "所选日期没有缓存记录；可修改日期或同步。");
+  }
+  $("local-load").addEventListener("click", () => act(() => {
+    const key = $("dashboard-account").value ||
+      (inventory?.accounts.some(item => item.account_key === loadedCacheAccount) ? loadedCacheAccount : null);
+    return loadAccount(key, {scope:$("local-read-scope").value});
   }));
+  $("dashboard-account").addEventListener("change", () => {
+    const key = $("dashboard-account").value;
+    if (!key) return;
+    act(async () => {
+      try { await loadAccount(key, {remember:true}); }
+      finally { $("dashboard-account").value = manuallyImported ? "" : loadedCacheAccount || ""; }
+    });
+  });
   async function startSync(exportAfter) {
     try {
       const payload = dates();
@@ -203,12 +250,25 @@
   $("local-open-exports").addEventListener("click", () => act(async () => { await request("/api/open-exports", {}); notify("已打开本机导出文件夹。"); }));
   $("local-cancel").addEventListener("click", () => act(async () => { if (job) await request("/api/cancel", {id:job.id}); }));
   $("local-reconnect").addEventListener("click", poll);
+  $("backend-start").addEventListener("click", () => act(async () => {
+    try { await request("/api/start", {}); }
+    catch (error) {
+      const message = error.status ? error.message : "本机启动器尚未运行，请先运行“启动小米数据导出.cmd”，再点击开启。";
+      $("backend-start-message").textContent = message;
+      throw new Error(message);
+    }
+    explicitlyClosed = false;
+    inventoryNeeded = true;
+    $("backend-start-message").textContent = "开启后可读取本机账号数据、同步和管理数据库。手动导入与离线展示可继续使用。";
+    $("backend-help").close();
+  }));
   $("local-shutdown").addEventListener("click", async () => {
     // Closing also cancels a running sync. Do not make this confirmation depend on busy=false.
     if (!window.confirm("关闭这台电脑上的后端服务？正在执行的任务将取消或完成收尾，当前网页仍可独立使用。")) return;
     await act(async () => {
       await request("/api/shutdown", {});
       explicitlyClosed = true; generation++; clearTimeout(timer); disconnected();
+      $("local-panel").close();
     });
   });
 
@@ -245,13 +305,14 @@
     }
     controls();
   }
-  async function refreshInventory() {
+  async function refreshInventory({automatic=false} = {}) {
     if (inventoryPending || !connected || busy) return;
     inventoryPending = true; controls();
     try {
       const value = await request("/api/accounts");
       const previous = $("db-account").value;
       inventory = value;
+      inventoryNeeded = false;
       $("db-account").replaceChildren(new Option("请选择一个账号", ""));
       for (const item of value.accounts) {
         $("db-account").append(new Option(`${item.label}${item.current ? " · 当前账号" : ""} · ${bytes(item.database_bytes)} · ${dateRange(item.start,item.end)}`, item.account_key));
@@ -259,6 +320,18 @@
       $("db-account").value = value.accounts.some(item => item.account_key === previous) ? previous : "";
       $("db-total").textContent = `${value.accounts.length} 个账号数据库 · 总占用 ${bytes(value.total_bytes)}（含 WAL / SHM）`;
       renderAccount();
+      const readable = value.accounts.filter(item => !item.error);
+      const view = $("dashboard-account");
+      view.replaceChildren(new Option(manuallyImported ? "手动导入的档案" : "请选择账号", ""));
+      for (const item of readable) view.append(new Option(item.label, item.account_key));
+      view.value = manuallyImported ? "" : loadedCacheAccount || "";
+      $("account-picker").hidden = false;
+      if (automatic && readable.length && !manuallyImported && !dashboard.isImporting()) {
+        const preferred = loadedCacheAccount || rememberedAccount();
+        const initial = readable.find(item => item.account_key === preferred) || readable[0];
+        try { await loadAccount(initial.account_key, {quiet:true}); }
+        catch (error) { notify(error.message); view.value = manuallyImported ? "" : loadedCacheAccount || ""; }
+      }
     } catch (error) {
       inventory = null; $("db-account").replaceChildren(new Option("读取未完成，请刷新", ""));
       $("db-total").textContent = "未能读取数据库列表。"; renderAccount(); notify(error.message);
@@ -298,9 +371,18 @@
   }
   $("db-delete").addEventListener("click", () => deleteSelection(false));
   $("db-delete-account").addEventListener("click", () => deleteSelection(true));
-  document.addEventListener("mifit:import-state", controls);
+  document.addEventListener("mifit:import-state", () => {
+    if (dashboard.isImporting()) manuallyImported = true;
+    controls();
+  });
   document.addEventListener("mifit:data-updated", () => {
-    if (!loadingCache) { loadedCacheAccount = null; $("local-source").textContent = "当前档案：手动导入；尚未用本地缓存替换。"; }
+    if (!loadingCache) {
+      manuallyImported = true;
+      loadedCacheAccount = null;
+      $("dashboard-account").value = "";
+      $("dashboard-account").options[0].textContent = "手动导入的档案";
+      $("local-source").textContent = "当前档案：手动导入；尚未用本地缓存替换。";
+    }
   });
   controls(); poll();
 })();

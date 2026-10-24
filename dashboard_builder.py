@@ -57,6 +57,7 @@ def render_html(summary: dict, *, local_token: str | None = None) -> str:
             source.read_text(encoding="utf-8") for source in (
                 DETAIL_STYLES, INTRADAY_STYLES, ROOT / "dashboard" / "console-shell.css",
                 ROOT / "dashboard" / "date-picker.css",
+                ROOT / "dashboard" / "select-picker.css",
             )
         ),
         "__DETAIL_SCRIPT__": detail_script,
@@ -65,9 +66,10 @@ def render_html(summary: dict, *, local_token: str | None = None) -> str:
     # Substitute template markers once, never markers that happen to occur in data.
     document = re.sub("|".join(re.escape(marker) for marker in markers),
                       lambda match: replacements[match.group()], template)
-    date_script = (ROOT / "dashboard" / "date-picker.js").read_text(encoding="utf-8")
-    document = document.replace("</body>", '<script>\n' + date_script.replace("</script", "<\\/script")
-                                + "\n</script>\n</body>", 1)
+    for component in ("date-picker.js", "select-picker.js"):
+        script = (ROOT / "dashboard" / component).read_text(encoding="utf-8")
+        document = document.replace("</body>", '<script>\n' + script.replace("</script", "<\\/script")
+                                    + "\n</script>\n</body>", 1)
     if local_token is not None:
         if not re.fullmatch(r"[A-Za-z0-9_-]{43}", local_token):
             raise ValueError("Invalid local session token")

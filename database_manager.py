@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import desktop_backend as backend
+from dashboard_data import build_summary
 
 
 # Categories are whole CSV datasets; related detail tables cannot be selected
@@ -297,6 +298,16 @@ class _Plan:
 class DatabaseManager:
     def __init__(self):
         self._plans = {}
+
+    def summary(self, account_key, *, start=None, end=None):
+        """Read a chosen cached account without changing login credentials."""
+        _filters(start, end, None)
+        with _locked():
+            path = _path(account_key)
+            with closing(_connect(path)) as connection:
+                _identity(connection, account_key, _schema(connection))
+            options = {"start": start, "end": end} if start or end else {}
+            return build_summary(path, **options)
 
     def inventory(self):
         """Describe all managed accounts using read-only WAL-aware connections."""

@@ -69,6 +69,19 @@ def test_inventory_reports_accounts_all_seven_categories_ranges_and_actual_bytes
     assert "synthetic-token" not in str(listing)
 
 
+def test_summary_reads_selected_cache_without_changing_credentials_or_database(service):
+    first, path = database()
+    activity(path, "2026-01-01")
+    second, other = database("678901")
+    activity(other, "2026-01-02", user="678901")
+    before = path.read_bytes()
+    summary = service.summary(first)
+    assert [row["date"] for row in summary["days"]] == ["2026-01-01"]
+    assert backend.account_scope() == second
+    assert path.read_bytes() == before
+    assert service.summary(first, start="2026-01-02", end="2026-01-02")["days"] == []
+
+
 def test_date_and_category_are_intersected_and_body_measurement_is_whole_row(service):
     key, path = database()
     activity(path)

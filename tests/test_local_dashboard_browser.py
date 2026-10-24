@@ -1,6 +1,7 @@
 """Browser-to-loopback integration with synthetic data and blocked cloud access."""
 
 import asyncio
+import copy
 
 import pytest
 from playwright.sync_api import expect
@@ -347,3 +348,84 @@ def test_status_indicator_tracks_sync_disconnect_and_explicit_shutdown(live_page
     expect(page.locator("#backend-label")).to_have_text("后端已关闭")
     expect(page.locator("#local-load")).to_be_disabled()
     expect(page.locator("#import-button")).to_be_enabled()
+
+
+def test_connected_page_loads_first_account_and_remembers_successful_selection(live_page, server, monkeypatch, tiny_summary):
+    page = live_page
+    inventory = synthetic_inventory()
+    second = copy.deepcopy(inventory["accounts"][0])
+    second.update(account_key="synthetic-second", label="合成账号 01", current=False)
+    inventory["accounts"].append(second)
+    calls = []
+
+    def summary(account_key, **kwargs):
+        calls.append(account_key)
+        return tiny_summary
+
+    monkeypatch.setattr(server.databases, "inventory", lambda: inventory)
+    monkeypatch.setattr(server.databases, "summary", summary)
+    page.reload()
+    expect(page.locator("#archive-count")).to_contain_text("3 天")
+    expect(page.locator("#dashboard-account")).to_have_value("synthetic-account")
+    assert calls == ["synthetic-account"]
+    page.locator("#dashboard-account").select_option("synthetic-second")
+    expect(page.locator("#local-source")).to_contain_text("合成账号 01")
+    cookie = next(item for item in page.context.cookies() if item["name"] == "mifit_view_account")
+    assert cookie["value"] == "synthetic-second" and cookie["sameSite"] == "Strict"
+    page.reload()
+    expect(page.locator("#dashboard-account")).to_have_value("synthetic-second")
+    expect(page.locator("#archive-count")).to_contain_text("3 天")
+    assert calls[-1] == "synthetic-second"
+    inventory["accounts"] = inventory["accounts"][:1]
+    page.reload()
+    expect(page.locator("#dashboard-account")).to_have_value("synthetic-account")
+    expect(page.locator("#archive-count")).to_contain_text("3 天")
+
+
+def test_auto_account_load_preserves_manual_import_in_flight(live_page, server, monkeypatch, raw_import_file, tiny_summary):
+    page = live_page
+    monkeypatch.setattr(server.databases, "inventory", synthetic_inventory)
+    monkeypatch.setattr(server.databases, "summary", lambda *args, **kwargs: tiny_summary)
+    page.add_init_script("""(() => {
+      const original = window.fetch;
+      window.fetch = async (...args) => {
+        const response = await original(...args);
+        if (args[0] === '/api/cache') await new Promise(resolve => {
+          window.releaseCache = resolve; document.documentElement.dataset.cacheReady = 'true';
+        });
+        return response;
+      };
+    })();""")
+    page.reload()
+    expect(page.locator("html")).to_have_attribute("data-cache-ready", "true")
+    page.locator("#import-file").set_input_files(str(raw_import_file))
+    expect(page.locator("#toast")).to_contain_text("导入完成")
+    imported = page.evaluate("JSON.stringify(MiFitDashboard.getData())")
+    page.evaluate("releaseCache()")
+    expect(page.locator("#toast")).to_contain_text("已保留手动导入")
+    expect(page.locator("#dashboard-account")).to_have_value("")
+    assert page.evaluate("JSON.stringify(MiFitDashboard.getData())") == imported
+
+
+def test_console_scroll_excludes_header_and_closed_service_can_be_started(live_page, server):
+    page = live_page
+    layout = page.evaluate("""() => {
+      const panel = document.querySelector('#local-panel'), header = panel.querySelector('header');
+      const body = panel.querySelector('.local-console-body');
+      const top = header.getBoundingClientRect().top;
+      body.scrollTop = body.scrollHeight;
+      return {headerStayed:header.getBoundingClientRect().top === top,
+        bodyBelowHeader:body.getBoundingClientRect().top >= header.getBoundingClientRect().bottom,
+        bodyScrolled:body.scrollTop > 0, panelScroll:panel.scrollTop,
+        clipped:['hidden','clip'].includes(getComputedStyle(panel).overflowY)};
+    }""")
+    assert layout == {"headerStayed": True, "bodyBelowHeader": True, "bodyScrolled": True,
+                      "panelScroll": 0, "clipped": True}
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator("#local-shutdown").click()
+    expect(page.locator("#backend-label")).to_have_text("后端已关闭")
+    page.locator("#backend-toggle").click()
+    expect(page.locator("#backend-help-title")).to_have_text("后端暂未运行，是否开启")
+    page.locator("#backend-start").click()
+    expect(page.locator("#backend-label")).to_have_text("后端已连接")
+    expect(page.locator("#backend-help")).not_to_be_visible()
