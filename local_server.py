@@ -246,6 +246,15 @@ class LocalServer:
         self.thread = threading.Thread(
             target=self.httpd.serve_forever, name="MiFit-local-http", daemon=True,
         )
+        # Pin the page assets to this process's Python code. Reading new assets
+        # on each request can mix an old running backend with an updated UI.
+        empty = {"schema_version": 1, "days": [], "workouts": [],
+                 "meta": {"timezone": "Asia/Shanghai", "notes": []}}
+        try:
+            self.page = render_html(empty, local_token=self.token)
+        except Exception:
+            self.httpd.server_close()
+            raise
 
     def start(self):
         self.thread.start()
@@ -324,9 +333,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/":
             # Never embed private data in the initial navigation response.
-            empty = {"schema_version": 1, "days": [], "workouts": [],
-                     "meta": {"timezone": "Asia/Shanghai", "notes": []}}
-            self._send(200, render_html(empty, local_token=self.server.owner.token),
+            self._send(200, self.server.owner.page,
                        "text/html; charset=utf-8")
         elif self.path == "/api/status":
             self._send(200, self.server.owner.control.status())

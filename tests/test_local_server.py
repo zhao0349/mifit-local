@@ -74,6 +74,16 @@ def test_initial_page_and_status_never_sync_or_read_cache(server):
     local_server.login.assert_not_called()
 
 
+def test_running_server_keeps_matching_page_assets_until_restart(server, monkeypatch):
+    before = request(server, "/")[1]
+    assert '.sidebar-action{' in before and '.local-console{' in before
+    assert 'window.MiFitDatePicker' in before
+    renderer = Mock(side_effect=AssertionError("running servers must not reread updated assets"))
+    monkeypatch.setattr(local_server, "render_html", renderer)
+    assert request(server, "/")[1] == before
+    renderer.assert_not_called()
+
+
 @pytest.mark.parametrize("headers", [
     {"Host": "evil.example"}, {"Host": "localhost:17865"},
     {"Origin": "https://evil.example"}, {"Origin": "null"},
